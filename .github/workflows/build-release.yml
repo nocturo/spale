@@ -20,8 +20,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             build-essential clang llvm make pkg-config git ca-certificates \
             libbpf-dev libelf-dev zlib1g-dev libssl-dev libzstd-dev bpftool
 
