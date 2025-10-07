@@ -1,0 +1,16 @@
+[Unit]
+Description=SPALE - Single Packet Authorization in Linux eBPF
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/spale/spale.conf
+ExecStart=/usr/local/sbin/spale -c /etc/spale/spale.conf --drop-privs 65534:65534
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+

@@ -1,0 +1,13 @@
+This directory contains eBPF program sources licensed under:
+
+GPL-2.0-only
+
+See: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+Each eBPF source file contains an SPDX tag:
+
+// SPDX-License-Identifier: GPL-2.0-only
+
+and a license section required by the BPF loader:
+
+char LICENSE[] SEC("license") = "GPL";
