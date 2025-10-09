@@ -1,0 +1,19 @@
+Source: spale
+Section: net
+Priority: optional
+Maintainer: Nemanja Zeljkovic <nocturo@g-mail.com>
+Build-Depends: debhelper-compat (= 13), make, gcc, clang, bpftool, libbpf-dev, libelf-dev, zlib1g-dev, libssl-dev, pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/nocturo/spale
+Rules-Requires-Root: no
+
+Package: spale
+Architecture: linux-any
+Depends: ${misc:Depends}, ${shlibs:Depends}, systemd
+Recommends: bpftool
+Description: eBPF Single Packet Authentication with HPKE sender-auth
+ High-performance SPA (port knocking) implementedd in eBPF (TC or XDP) with an HPKE
+ sender-authenticated UDP control channel.
+
+
+

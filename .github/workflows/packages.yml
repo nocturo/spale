@@ -1,0 +1,81 @@
+name: build-packages
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: ${{ matrix.distro.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - { name: alma9,  container: 'almalinux:9' }
+          - { name: alma10, container: 'almalinux:10' }
+          - { name: debian12,  container: 'debian:12' }
+          - { name: debian13,  container: 'debian:13' }
+          - { name: ubuntu2404, container: 'ubuntu:24.04' }
+
+    container:
+      image: ${{ matrix.distro.container }}
+      options: --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare build deps (RPM-based)
+        if: contains(matrix.distro.name, 'alma')
+        run: |
+          dnf -y install 'dnf-command(config-manager)' || true
+          dnf -y groupinstall 'Development Tools'
+          dnf -y install make clang gcc bpftool openssl-devel elfutils-libelf-devel zlib-devel systemd-rpm-macros rpm-build git cmake zlib-devel pkgconfig
+          dnf --enablerepo=crb -y install libbpf libbpf-devel
+          mkdir -p /root/rpmbuild/{SOURCES,SRPMS,RPMS,BUILD,SPECS}
+          rpmbuild -bb dist/rpm/spale.spec --build-in-place --define "_topdir /root/rpmbuild" --define "_sourcedir $(pwd)" --define "_rpmdir $(pwd)/artifacts/rpm"
+
+      - name: Prepare build deps (Debian/Ubuntu)
+        if: "!contains(matrix.distro.name, 'alma')"
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          . /etc/os-release
+          if [ "$ID" = "ubuntu" ]; then
+            apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git
+          else
+            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git
+          fi
+          rm -rf debian && cp -a dist/debian debian
+          dpkg-buildpackage -b -us -uc
+          mkdir -p artifacts/deb
+          mv ../*.deb artifacts/deb/ || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.distro.name }}
+          path: |
+            artifacts/**
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+

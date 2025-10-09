@@ -1,0 +1,37 @@
+# spale configuration example. Copy to /etc/spale/spale.conf and adjust.
+
+# Interface and mode
+#IFACE=eth0
+#MODE=tc                 # tc|xdp
+
+# SPA UDP listen port (where you send your SPA)
+#LISTEN_PORT=55555
+
+# Ports to protect (max 16)
+#PROTECTED_PORTS=22,443,8443
+
+# Global defaults
+#IDLE_SEC=60             # extend allowlist on activity
+#GRACE_SEC=300           # post-disconnect grace window
+
+# Global SPA UDP rate limit (per-source)
+#SPA_RL_RATE=3
+#SPA_RL_BURST=3
+
+# HPKE credentials
+#SERVER_KEY=/etc/spale/server.key
+#CLIENTS_DIR=/etc/spale/clients
+
+# Always-allow list (bypass SPA); IPv4/IPv6 IPs or CIDR
+#ALWAYS_ALLOW=192.168.1.10,10.0.0.0/8,2001:db8::/32
+
+# Observe-only mode (never drop traffic); 0 or 1
+#LOG_ONLY=0
+
+# Per-client overrides (by client ID; case-insensitive)
+# For client "ADMIN" (from admin.pem public key file name):
+#ADMIN_IDLE_SEC=120
+#ADMIN_GRACE_SEC=60
+#ADMIN_PORTS=22,8443
+
+
