@@ -55,12 +55,19 @@ jobs:
           mkdir -p artifacts/deb
           mv ../*.deb artifacts/deb/ || true
 
+      - name: Collect final package files
+        run: |
+          set -e
+          mkdir -p final
+          if [ -d artifacts ]; then
+            find artifacts -type f \( -name '*.rpm' -o -name '*.deb' \) ! -name '*dbgsym*' -exec cp -a {} final/ \;
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.distro.name }}
-          path: |
-            artifacts/**
+          path: final/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
