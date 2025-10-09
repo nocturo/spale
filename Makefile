@@ -8,6 +8,7 @@ SKEL = src/spa_kern.skel.h
 SKEL_TC = src/spa_kern_tc.skel.h
 LOADER = build/spale
 
+BPFTOOL ?= bpftool
 BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_x86
 USR_CFLAGS ?= -O2 -g -Wall -Werror
 USR_LDFLAGS ?=
@@ -39,17 +40,15 @@ $(TCBPFOBJ): bpf/spa_kern_tc.bpf.c include/spa_common.h $(VMLINUX)
 
 $(VMLINUX):
 	@mkdir -p bpf
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
 
 $(SKEL): $(BPFOBJ)
 	@mkdir -p src
-	# Requires bpftool available in PATH
-	bpftool gen skeleton $< > $@
+	$(BPFTOOL) gen skeleton $< > $@
 
 $(SKEL_TC): $(TCBPFOBJ)
 	@mkdir -p src
-	# Requires bpftool available in PATH
-	bpftool gen skeleton $< > $@
+	$(BPFTOOL) gen skeleton $< > $@
 
 
 $(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c $(SKEL) $(SKEL_TC) include/spa_common.h
