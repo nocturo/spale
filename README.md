@@ -1,15 +1,19 @@
 ## spale: eBPF Single Packet Authentication (SPA) with HPKE sender-auth
 
-High-performance SPA enforced in eBPF (XDP or TC) with an HPKE sender-authenticated UDP control channel. On a valid SPA packet, the source address is allowlisted per protected destination port; allowed flows extend an idle timer and a post-disconnect grace window.
+<img src="doc/spale.jpg" alt="spale project avatar" align="left" width="64" style="margin-right: 12px; margin-bottom: 6px;">
+
+High-performance SPA (port knocking) implemented in eBPF (using TC or XDP for heavylifting) with an HPKE sender-authenticated UDP control channel. On a valid SPA packet, the source address is allowlisted per protected destination port.
 
 ### Features
+- No firewall software required
 - HPKE sender-auth (RFC 9180) using X25519 and ChaCha20-Poly1305
-- eBPF enforcement at ingress: XDP or TC
+- eBPF enforcement at ingress using either TC (default) or optional XDP mode for more oomph
 - IPv4 and IPv6 support
 - Protects TCP and UDP destination ports you configure
 - Idle extension and post-disconnect grace windows (per-entry overrideable)
-- Global SPA UDP rate limiting (per source) with burst
+- Global SPA UDP rate limiting (per source)
 - Always-allow lists via IPv4/IPv6 exact IPs or CIDR
+- Self contained statically compiled binary
 - Can run without root by dropping privileges after inital startup
 - Optional map pinning under bpffs during runtime
 
@@ -31,7 +35,7 @@ Installs `/usr/local/sbin/spale` by default. Adjust with `PREFIX` and `SYSCONFDI
 - Download the `spale` asset from the latest release, then:
 ```bash
 chmod +x spale
-# Optional: verify checksum
+# verify checksum
 
 # Install system-wide
 sudo install -m0755 spale /usr/local/sbin/spale
@@ -100,11 +104,11 @@ Notes:
 - The SPA plaintext includes a time step (30s window, ±1 step) and a random nonce; a replay cache prevents re-use during the process lifetime.
 
 ### Running
-The loader requires an interface, SPA listen port, HPKE server key, clients directory, and `PROTECTED_PORTS` via config/env.
+The loader requires an interface, SPA listen port, HPKE server key, clients directory (with at least one client), and `PROTECTED_PORTS` provided via either config/env.
 
 TC mode example:
 ```bash
-sudo /usr/local/sbin/spale -m tc -i eth0 -S 55555 \
+sudo /usr/local/sbin/spale -i eth0 -S 55555 \
   --server-key /etc/spale/server.key --clients /etc/spale/clients \
   -t 60 -g 300 -c /etc/spale/spale.conf
 ```
@@ -121,7 +125,7 @@ Flags of interest:
 - `--server-key PATH`, `--clients DIR`, `--drop-privs user[:group]`
 
 ### Sending SPA (client)
-Use the provided HPKE sender script:
+Use the provided sender script:
 ```bash
 python3 tools/spa_send.py --host 203.0.113.10 --port 55555 \
   --server-pk server.pub \
