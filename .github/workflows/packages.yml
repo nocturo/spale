@@ -6,6 +6,9 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.distro.name }}
@@ -32,10 +35,10 @@ jobs:
         if: contains(matrix.distro.name, 'alma')
         run: |
           # Derive version/release
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v([0-9]+(\.[0-9]+){1,2})$ ]]; then
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then
             PKG_VERSION="${GITHUB_REF_NAME#v}"; PKG_RELEASE="1"
           else
-            PKG_VERSION="$(date -u +%Y.%m.%d)-g${GITHUB_SHA::7}"; PKG_RELEASE="${GITHUB_RUN_NUMBER}"
+            PKG_VERSION="$(date -u +%Y.%m.%d)-g$(echo "${GITHUB_SHA}" | cut -c1-7)"; PKG_RELEASE="${GITHUB_RUN_NUMBER}"
           fi
           echo "PKG_VERSION=$PKG_VERSION" >> $GITHUB_ENV
           echo "PKG_RELEASE=$PKG_RELEASE" >> $GITHUB_ENV
@@ -63,10 +66,10 @@ jobs:
         if: "!contains(matrix.distro.name, 'alma')"
         run: |
           # Derive version
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v([0-9]+(\.[0-9]+){1,2})$ ]]; then
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then
             PKG_VERSION="${GITHUB_REF_NAME#v}"
           else
-            PKG_VERSION="$(date -u +%Y.%m.%d)-g${GITHUB_SHA::7}"
+            PKG_VERSION="$(date -u +%Y.%m.%d)-g$(echo "${GITHUB_SHA}" | cut -c1-7)"
           fi
           echo "PKG_VERSION=$PKG_VERSION" >> $GITHUB_ENV
           export DEBIAN_FRONTEND=noninteractive
