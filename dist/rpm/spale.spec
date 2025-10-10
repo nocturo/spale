@@ -1,6 +1,6 @@
 Name:           spale
-Version:        0.1.0
-Release:        1%{?dist}
+Version:        %{version}
+Release:        %{release}%{?dist}
 Summary:        eBPF Single Packet Authentication with HPKE sender-auth
 
 License:        MIT AND GPL-2.0-only

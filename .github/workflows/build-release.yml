@@ -48,6 +48,5 @@ jobs:
         with:
           files: |
             build/spale
-          generate_release_notes: true
 
 
