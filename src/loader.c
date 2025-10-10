@@ -55,6 +55,8 @@ static void load_conf_kv_into_env(const char *path)
         *eq = '\0';
         char *key = line;
         char *val = eq + 1;
+        char *hash = strchr(val, '#');
+        if (hash) { *hash = '\0'; }
         trim(key);
         trim(val);
         if (*key == '\0') continue;
@@ -570,6 +572,8 @@ int main(int argc, char **argv) {
     bool log_only = false;
     const char *drop_privs_arg = NULL;
     uid_t drop_uid = (uid_t)-1; gid_t drop_gid = (gid_t)-1;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
 bool pin_maps = false;
 int opt;
