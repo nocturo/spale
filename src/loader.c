@@ -501,7 +501,8 @@ static void process_spa_v4(const struct loop_ctx *ctx)
 
     __u32 src_ip = peer.sin_addr.s_addr;
     struct allowed_entry val; memset(&val, 0, sizeof(val));
-    uint64_t now_ns = (uint64_t)time(NULL) * 1000000000ull;
+    struct timespec ts_now_v4; clock_gettime(CLOCK_MONOTONIC, &ts_now_v4);
+    uint64_t now_ns = (uint64_t)ts_now_v4.tv_sec * 1000000000ull + (uint64_t)ts_now_v4.tv_nsec;
     val.allow_expires_at_ns = now_ns + ctx->cfg->idle_extend_ns;
     val.grace_expires_at_ns = now_ns + ctx->cfg->post_disconnect_grace_ns;
     val.initialized = 1;
@@ -531,7 +532,8 @@ static void process_spa_v6(const struct loop_ctx *ctx)
     if (!ok2) return;
 
     struct allowed_entry val; memset(&val, 0, sizeof(val));
-    uint64_t now_ns = (uint64_t)time(NULL) * 1000000000ull;
+    struct timespec ts_now_v6; clock_gettime(CLOCK_MONOTONIC, &ts_now_v6);
+    uint64_t now_ns = (uint64_t)ts_now_v6.tv_sec * 1000000000ull + (uint64_t)ts_now_v6.tv_nsec;
     val.allow_expires_at_ns = now_ns + ctx->cfg->idle_extend_ns;
     val.grace_expires_at_ns = now_ns + ctx->cfg->post_disconnect_grace_ns;
     val.initialized = 1;
