@@ -31,6 +31,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install parse-changelog
+        uses: taiki-e/install-action@parse-changelog
+
       - name: Prepare build deps (RPM-based)
         if: contains(matrix.distro.name, 'alma')
         run: |
@@ -43,24 +46,44 @@ jobs:
           echo "PKG_VERSION=$PKG_VERSION" >> $GITHUB_ENV
           echo "PKG_RELEASE=$PKG_RELEASE" >> $GITHUB_ENV
 
-          # Build spec with %changelog from CHANGELOG.md for this version
-          CHANGE_DATE=$(date +"%a %b %d %Y")
-          AUTHOR_NAME=${GIT_AUTHOR_NAME:-${GITHUB_ACTOR:-CI}}
+          AUTHOR_NAME=${GIT_AUTHOR_NAME:-${GITHUB_ACTOR:-Package Automation}}
           AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-ci@users.noreply.github.com}
-          CHANGE_BODY=$(awk -v ver="$PKG_VERSION" 'BEGIN{p=0} /^## \\[/ { if(p) exit } { if($0 ~ "^## \\[" ver "\\\\]" ) { p=1; next } } p { print }' CHANGELOG.md | sed -e 's/^[-*][[:space:]]\{1,\}/- /')
-          if [ -z "$CHANGE_BODY" ]; then CHANGE_BODY="- Release $PKG_VERSION"; fi
+          CURRENT_VER_NORM="${PKG_VERSION#v}"
+          CHANGELOG_JSON=$(parse-changelog CHANGELOG.md --json || true)
           awk 'BEGIN{emit=1} { if($0 ~ /^%changelog/) emit=0; if(emit) print }' dist/rpm/spale.spec > dist/rpm/spale.spec.gen
           {
             echo "%changelog"
-            echo "* ${CHANGE_DATE} ${AUTHOR_NAME} <${AUTHOR_EMAIL}> - ${PKG_VERSION}-${PKG_RELEASE}"
-            echo "$CHANGE_BODY"
+            if [ -z "$CHANGELOG_JSON" ] || ! echo "$CHANGELOG_JSON" | jq -e . >/dev/null 2>&1; then
+              CHANGE_DATE=$(date +"%a %b %d %Y")
+              echo "* ${CHANGE_DATE} ${AUTHOR_NAME} <${AUTHOR_EMAIL}> - ${PKG_VERSION}-${PKG_RELEASE}"
+              echo "- Release ${PKG_VERSION}"
+            else
+              VERSIONS=$(echo "$CHANGELOG_JSON" | jq -r 'keys | sort_by(split(".")|map(tonumber)) | reverse | .[]')
+              if ! echo "$VERSIONS" | grep -qx "$CURRENT_VER_NORM"; then
+                CHANGE_DATE=$(date +"%a %b %d %Y")
+                echo "* ${CHANGE_DATE} ${AUTHOR_NAME} <${AUTHOR_EMAIL}> - ${PKG_VERSION}-${PKG_RELEASE}"
+                echo "- CI build ${PKG_VERSION}"
+              fi
+              for v in $VERSIONS; do
+                title=$(echo "$CHANGELOG_JSON" | jq -r --arg v "$v" '.[$v].title')
+                notes=$(echo "$CHANGELOG_JSON" | jq -r --arg v "$v" '.[$v].notes')
+                datestr=$(printf "%s\n" "$title" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -n1)
+                if [ -n "$datestr" ]; then change_date=$(date -d "$datestr" +"%a %b %d %Y"); else change_date=$(date +"%a %b %d %Y"); fi
+                rel="1"; if [ "$v" = "$CURRENT_VER_NORM" ] && [ -n "$PKG_RELEASE" ]; then rel="$PKG_RELEASE"; fi
+                echo "* ${change_date} ${AUTHOR_NAME} <${AUTHOR_EMAIL}> - ${v}-${rel}"
+                printf "%s\n" "$notes" | while IFS= read -r line; do
+                  [ -z "$line" ] && continue
+                  echo "$line" | sed -e 's/^[-*][[:space:]]\{1,\}/- /'
+                done
+              done
+            fi
           } >> dist/rpm/spale.spec.gen
           dnf -y install 'dnf-command(config-manager)' || true
           dnf -y groupinstall 'Development Tools'
-          dnf -y install make clang gcc bpftool openssl-devel elfutils-libelf-devel zlib-devel systemd-rpm-macros rpm-build git cmake zlib-devel pkgconfig
+          dnf -y install make clang gcc bpftool openssl-devel elfutils-libelf-devel zlib-devel systemd-rpm-macros rpm-build git cmake zlib-devel pkgconfig jq
           dnf --enablerepo=crb -y install libbpf libbpf-devel
           mkdir -p /root/rpmbuild/{SOURCES,SRPMS,RPMS,BUILD,SPECS}
-          rpmbuild -bb dist/rpm/spale.spec --build-in-place --define "_topdir /root/rpmbuild" --define "_sourcedir $(pwd)" --define "_rpmdir $(pwd)/artifacts/rpm" --define "version ${PKG_VERSION}" --define "release ${PKG_RELEASE}"
+          rpmbuild -bb dist/rpm/spale.spec.gen --build-in-place --define "_topdir /root/rpmbuild" --define "_sourcedir $(pwd)" --define "_rpmdir $(pwd)/artifacts/rpm" --define "version ${PKG_VERSION}" --define "release ${PKG_RELEASE}"
 
       - name: Prepare build deps (Debian/Ubuntu)
         if: "!contains(matrix.distro.name, 'alma')"
@@ -76,26 +99,50 @@ jobs:
           apt-get update
           . /etc/os-release
           if [ "$ID" = "ubuntu" ]; then
-            apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git
+            apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
             export BPFTOOL="/usr/lib/linux-tools*/bpftool"
           else
-            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git
+            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
           fi
           rm -rf debian && cp -a dist/debian debian
-          export DEBFULLNAME="CI"; export DEBEMAIL="ci@users.noreply.github.com"
-          if [ -f debian/changelog ]; then
-            dch -v "${PKG_VERSION}-1" "Release ${PKG_VERSION}"
+          export DEBFULLNAME="Package Automation"; export DEBEMAIL="ci@users.noreply.github.com"
+          # Build complete debian/changelog from CHANGELOG.md JSON
+          CHANGELOG_JSON=$(parse-changelog CHANGELOG.md --json || true)
+          rm -f debian/changelog
+          CURRENT_VER_NORM="${PKG_VERSION#v}"; CURRENT_VER_NORM="${CURRENT_VER_NORM%%-*}"; CURRENT_VER_NORM="${CURRENT_VER_NORM%%+*}"
+          if [ -z "$CHANGELOG_JSON" ] || ! echo "$CHANGELOG_JSON" | jq -e . >/dev/null 2>&1; then
+            dch --create -v "${PKG_VERSION}-1" --package spale --distribution unstable -u medium "CI build ${PKG_VERSION}"
+            dch -r ""
           else
-            dch --create -v "${PKG_VERSION}-1" --package spale --distribution unstable "Release ${PKG_VERSION}"
+            VERSIONS=$(echo "$CHANGELOG_JSON" | jq -r 'keys | sort_by(split(".")|map(tonumber)) | reverse | .[]')
+            first=1
+            for v in $VERSIONS; do
+              title=$(echo "$CHANGELOG_JSON" | jq -r --arg v "$v" '.[$v].title')
+              notes=$(echo "$CHANGELOG_JSON" | jq -r --arg v "$v" '.[$v].notes')
+              datestr=$(printf "%s\n" "$title" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -n1)
+              if [ $first -eq 1 ]; then
+                dch --create -v "${v}-1" --package spale --distribution unstable -u medium "Release ${v}"
+                first=0
+              else
+                dch --newversion "${v}-1" --distribution unstable -u medium "Release ${v}"
+              fi
+              printf "%s\n" "$notes" | while IFS= read -r line; do
+                msg=$(echo "$line" | sed -e 's/^[-*][[:space:]]\{1,\}/* /')
+                [ -n "$msg" ] && dch -a "$msg"
+              done
+              if [ -n "$datestr" ]; then
+                export DEBCHANGE_TIMESTAMP="$(date -d "$datestr" +%s)"
+              else
+                unset DEBCHANGE_TIMESTAMP
+              fi
+              dch -r ""
+            done
+            # Ensure a snapshot entry exists if building a non-tag version
+            if ! echo "$VERSIONS" | head -n1 | grep -qx "$CURRENT_VER_NORM"; then
+              dch --newversion "${PKG_VERSION}-1" --distribution unstable -u medium "CI build ${PKG_VERSION}"
+              dch -r ""
+            fi
           fi
-          CHANGE_BODY=$(awk -v ver="$PKG_VERSION" 'BEGIN{p=0} /^## \\[\[/ { if(p) exit } { if($0 ~ "^## \\[/" ver "\\\\]" ) { p=1; next } } p { print }' CHANGELOG.md)
-          if [ -z "$CHANGE_BODY" ]; then CHANGE_BODY="- Release $PKG_VERSION"; fi
-          echo "$CHANGE_BODY" | while IFS= read -r line; do
-            # Convert markdown bullets to Debian changelog bullets
-            msg=$(echo "$line" | sed -e 's/^[-*][[:space:]]\{1,\}/* /')
-            [ -n "$msg" ] && dch -a "$msg"
-          done
-          dch -r ""
           dpkg-buildpackage -b -us -uc
           mkdir -p artifacts/deb
           mv ../*.deb artifacts/deb/ || true
@@ -119,7 +166,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: final/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 
