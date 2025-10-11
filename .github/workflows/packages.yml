@@ -145,7 +145,11 @@ jobs:
           fi
           dpkg-buildpackage -b -us -uc
           mkdir -p artifacts/deb
-          mv ../*.deb artifacts/deb/ || true
+          for f in ../*.deb; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f")
+            mv "$f" "artifacts/deb/${{ matrix.distro.name }}-$base"
+          done
 
       - name: Collect final package files
         run: |
