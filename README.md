@@ -61,47 +61,8 @@ openssl pkey -in /etc/spale/clients/admin.key -pubout -out admin.pem
 Now copy over the client's public key to the server and place it in /etc/spale/clients/admin.pem
 
 ### Configuration file: `/etc/spale/spale.conf`
-Simple `KEY=VALUE` file. On start, the loader reads this file and exports entries to the environment (CLI flags override env). Important keys:
-
-```bash
-# Interface / mode / SPA listen port
-IFACE=eth0
-MODE=tc                   # tc|xdp
-LISTEN_PORT=55555         # SPA UDP port
-
-# Protected destination ports (max 16)
-PROTECTED_PORTS=22,443,8443
-
-# Defaults for all clients
-IDLE_SEC=60
-GRACE_SEC=300
-
-# Global SPA UDP rate limit (per-source)
-SPA_RL_RATE=3
-SPA_RL_BURST=3
-
-# HPKE credentials
-SERVER_KEY=/etc/spale/server.key
-CLIENTS_DIR=/etc/spale/clients     # *.pem public keys; basename is client ID
-
-# Always-allowed sources (bypass SPA). IPv4/IPv6 IPs or CIDR.
-ALWAYS_ALLOW=192.168.1.10,10.0.0.0/8,203.0.113.0/24,2001:db8::/32
-
-# Optional: never drop (observe only)
-LOG_ONLY=0
-```
-
-Per-client overrides:
-```bash
-# For /etc/spale/clients/ADMIN.pem
-ADMIN_IDLE_SEC=120
-ADMIN_GRACE_SEC=60
-ADMIN_PORTS=22,8443           # subset of PROTECTED_PORTS; if omitted, all previously defined ports.
-```
-
-Notes:
-- Allowlist entries are tracked per (src, dport) and extend on each matching packet.
-- The SPA plaintext includes a time step (30s window, ±1 step) and a random nonce; a replay cache prevents re-use during the process lifetime.
+Simple `KEY=VALUE` file. On start, the loader reads this file and exports entries to the environment (CLI flags override env). 
+Example config can be found [here](doc/spale.conf.example).
 
 ### Running
 The loader requires an interface, SPA listen port, HPKE server key, clients directory (with at least one client), and `PROTECTED_PORTS` provided via either config/env.
@@ -120,17 +81,53 @@ sudo /usr/local/sbin/spale -m xdp -i eth0 -S 55555 \
   -c /etc/spale/spale.conf
 ```
 
-Flags of interest:
-- `-i IFACE`, `-S PORT`, `-m xdp|tc`, `-t IDLE_SEC`, `-g GRACE_SEC`, `-p` (pin maps), `-n` (log-only)
-- `--server-key PATH`, `--clients DIR`, `--drop-privs user[:group]`
-
 ### Sending SPA (client)
-Use the provided sender script:
+Use the provided sender script at [tools/spa_send.py](tools/spa_send.py)
+
+Basic usage with a single key file (server public + client private in one PEM):
 ```bash
+# Create a key file containing both PEM blocks (order doesn't matter)
+cat server.pem admin.key > admin.key
+
 python3 tools/spa_send.py --host 203.0.113.10 --port 55555 \
-  --server-pk server.pub \
-  --client-sk admin.key
+  --key admin.key
 ```
+
+Profile-based usage:
+```bash
+# Create profile in user's config dir
+python3 tools/spa_send.py profile create myserver \
+  --host 203.0.113.10 --port 55555 \
+  --key admin.key
+
+# Send using the profile
+python3 tools/spa_send.py --profile myserver
+
+# Or use short flag
+python3 tools/spa_send.py -p myserver
+```
+
+Profile management:
+```bash
+# List profiles
+python3 tools/spa_send.py profile list
+
+# Show profile
+python3 tools/spa_send.py profile show myserver
+
+# Update profile values
+python3 tools/spa_send.py profile set myserver --host 203.0.113.11 --port 55556
+
+# Replace key for a profile
+python3 tools/spa_send.py profile set myserver --key /path/to/new.key
+
+# Delete profile
+python3 tools/spa_send.py profile delete -y myserver
+```
+
+Each profile lives in `<config_root>/<name>/` and contains:
+- `config` file with simple `KEY=VALUE` pairs (`HOST`, `PORT`, optional `STEP`, `SOURCE`, `COUNT`)
+- `key` combined PEM containing the server public key and client private key
 
 Requires Python `cryptography` (`pip install cryptography`). The script supports IPv4/IPv6 and optional `--source` binding.
 
