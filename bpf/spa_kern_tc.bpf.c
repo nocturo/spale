@@ -4,98 +4,9 @@
 #include <bpf/bpf_endian.h>
 
 #include "spa_common.h"
+#include "spa_bpf_common.h"
 
 char LICENSE[] SEC("license") = "GPL";
-
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 16384);
-    __type(key, struct allowed_key);    // (src,dport)
-    __type(value, struct allowed_entry);
-} allowed_ipv4 SEC(".maps");
-
-// IPv6 allowlist keyed by (src6, dport)
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 16384);
-    __type(key, struct allowed6_key);
-    __type(value, struct allowed_entry);
-} allowed_ipv6 SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, struct spa_config);
-} config_map SEC(".maps");
-
-struct rl_entry { __u64 last_ts; __u32 tokens; };
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 65536);
-    __type(key, __u32);                 // IPv4 src
-    __type(value, struct rl_entry);
-} spa_rl SEC(".maps");
-
-// Rate limit per IPv6 source
-struct rl6_key { __u8 src6[16]; };
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 65536);
-    __type(key, struct rl6_key);
-    __type(value, struct rl_entry);
-} spa_rl6 SEC(".maps");
-
-// LPM trie for globally always-allowed IPv4 sources
-struct {
-    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __uint(max_entries, 1024);
-    __type(key, struct lpm_v4);
-    __type(value, __u8);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-} always_allow_v4 SEC(".maps");
-
-// LPM trie for globally always-allowed IPv6 sources
-struct {
-    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __uint(max_entries, 1024);
-    __type(key, struct lpm_v6);
-    __type(value, __u8);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-} always_allow_v6 SEC(".maps");
-
-// Hash set of protected L4 destination ports (network byte order)
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, PROTECTED_PORTS_MAX);
-    __type(key, __u16);
-    __type(value, __u8);
-} protected_ports_set SEC(".maps");
-
-static __always_inline int rl_allow(__u32 src, struct spa_config *cfg) {
-    struct rl_entry *e = bpf_map_lookup_elem(&spa_rl, &src);
-    __u64 now = bpf_ktime_get_ns();
-    __u64 rate_ns = cfg->spa_rl_rate_per_sec ? (1000000000ull / cfg->spa_rl_rate_per_sec) : 0;
-    __u32 burst = cfg->spa_rl_burst ? cfg->spa_rl_burst : 1;
-    if (!rate_ns) return 1; // disabled
-    if (!e) {
-        // Zero-initialize to satisfy older verifier (avoid reading uninit padding)
-        struct rl_entry init = {0};
-        init.last_ts = now;
-        init.tokens = burst - 1;
-        bpf_map_update_elem(&spa_rl, &src, &init, BPF_ANY);
-        return 1;
-    }
-    __u64 elapsed = now - e->last_ts;
-    if (elapsed >= rate_ns) {
-        __u64 add = elapsed / rate_ns;
-        __u64 newt = e->tokens + add;
-        e->tokens = newt > burst ? burst : (__u32)newt;
-        e->last_ts = now;
-    }
-    if (e->tokens > 0) { e->tokens--; return 1; }
-    return 0;
-}
 
 static __always_inline int load_bytes(void *dst, void *data, void *data_end, __u64 off, __u64 len)
 {
@@ -134,8 +45,8 @@ int tc_spa(struct __sk_buff *skb)
 			struct udphdr udp;
 			if (load_bytes(&udp, data, data_end, l4_off, sizeof(udp)) < 0)
 				return BPF_OK;
-			if (udp.dest == cfg->spa_port) {
-				if (!rl_allow(src, cfg)) return cfg->log_only ? BPF_OK : BPF_DROP;
+            if (udp.dest == cfg->spa_port) {
+                if (!rl_allow_v4(src, cfg)) return cfg->log_only ? BPF_OK : BPF_DROP;
 				return BPF_OK; // allow SPA packet to userspace
 			}
 			// Bypass SPA if source is in ALWAYS_ALLOW (CIDR) list
@@ -233,30 +144,8 @@ int tc_spa(struct __sk_buff *skb)
 		if (nexthdr == 17) {
 			struct udphdr udp;
 			if (load_bytes(&udp, data, data_end, l4_off, sizeof(udp)) < 0) return BPF_OK;
-			if (udp.dest == cfg->spa_port) {
-				// RL for IPv6
-				struct rl_entry *e = bpf_map_lookup_elem(&spa_rl6, &rlk);
-				__u64 now = bpf_ktime_get_ns();
-				__u64 rate_ns = cfg->spa_rl_rate_per_sec ? (1000000000ull / cfg->spa_rl_rate_per_sec) : 0;
-				__u32 burst = cfg->spa_rl_burst ? cfg->spa_rl_burst : 1;
-				int allow = 1;
-				if (rate_ns) {
-					if (!e) {
-						struct rl_entry init = {0}; init.last_ts = now; init.tokens = burst - 1;
-						bpf_map_update_elem(&spa_rl6, &rlk, &init, BPF_ANY);
-						allow = 1;
-					} else {
-						__u64 elapsed = now - e->last_ts;
-						if (elapsed >= rate_ns) {
-							__u64 add = elapsed / rate_ns;
-							__u64 newt = e->tokens + add;
-							e->tokens = newt > burst ? burst : (__u32)newt;
-							e->last_ts = now;
-						}
-						if (e->tokens > 0) { e->tokens--; allow = 1; } else { allow = 0; }
-					}
-				}
-				if (!allow) return cfg->log_only ? BPF_OK : BPF_DROP;
+            if (udp.dest == cfg->spa_port) {
+                if (!rl_allow6(&ip6h.saddr, cfg)) return cfg->log_only ? BPF_OK : BPF_DROP;
 				return BPF_OK;
 			}
 			// Bypass SPA if source is in ALWAYS_ALLOW (CIDR) list
