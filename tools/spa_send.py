@@ -237,18 +237,12 @@ def send_cmd(args):
                 print(f"bound to source {args.source}")
         except Exception as e:
             print(f"warn: bind source failed: {e}", file=sys.stderr)
-    try:
-        s.connect(sa)
-    except Exception as e:
-        print(f"error: connect failed: {e}", file=sys.stderr)
-        sys.exit(1)
 
-    src = s.getsockname()
     if args.verbose:
         if af == socket.AF_INET6:
-            print(f"src=[{src[0]}]:{src[1]} -> dst=[{sa[0]}]:{sa[1]}")
+            print(f"dst=[{sa[0]}]:{sa[1]}")
         else:
-            print(f"src={src[0]}:{src[1]} -> dst={sa[0]}:{sa[1]}")
+            print(f"dst={sa[0]}:{sa[1]}")
 
     ok = 0
     for i in range(max(1, args.count)):
@@ -284,10 +278,14 @@ def send_cmd(args):
         payload = client_pub + enc + ct
 
         try:
-            sent = s.send(payload)
+            sent = s.sendto(payload, sa)
             ok += 1
             if args.verbose:
-                print(f"i={i} sent={sent}")
+                src = s.getsockname()
+                if af == socket.AF_INET6:
+                    print(f"i={i} sent={sent} src=[{src[0]}]:{src[1]} -> dst=[{sa[0]}]:{sa[1]}")
+                else:
+                    print(f"i={i} sent={sent} src={src[0]}:{src[1]} -> dst={sa[0]}:{sa[1]}")
         except Exception as e:
             print(f"warn: send failed at i={i}: {e}", file=sys.stderr)
         time.sleep(0.2)
