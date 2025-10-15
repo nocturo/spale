@@ -162,6 +162,12 @@ int mgmt_server_handle(int mgmt_fd,
         tok[tl] = '\0';
         if (tok[0]) {
             char bufip[128]; strncpy(bufip, tok, sizeof(bufip) - 1); bufip[sizeof(bufip) - 1] = '\0';
+            // Handle IPv6 bracket notation [2001:db8::1] or [2001:db8::1]/64
+            size_t buflen = strlen(bufip);
+            if (buflen > 2 && bufip[0] == '[' && bufip[buflen-1] == ']') {
+                memmove(bufip, bufip + 1, buflen - 2);
+                bufip[buflen - 2] = '\0';
+            }
             char *slash = strchr(bufip, '/'); int prefix = -1;
             struct in_addr a4; struct in6_addr a6; int is_v4 = 0, is_v6 = 0;
             if (slash) { *slash = '\0'; prefix = atoi(slash + 1); }
@@ -205,13 +211,20 @@ int mgmt_server_handle(int mgmt_fd,
             else if (strncmp(arg, "--grace-sec", 11) == 0) { arg += 11; while (*arg == ' ' || *arg == '\t') arg++; grace_sec = strtol(arg, NULL, 10); have_grace = 1; while (*arg && *arg != ' ' && *arg != '\t' && *arg != '\n') arg++; }
             else { break; }
         }
-        if (ipstr && ipbuf[0] == '\0') {
-            const char *iend = ip_end;
-            if (!iend) { iend = ipstr; while (*iend && *iend != ' ' && *iend != '\t' && *iend != '\n') iend++; }
-            size_t ilen = (size_t)(iend > ipstr ? (size_t)(iend - ipstr) : 0);
-            if (ilen >= sizeof(ipbuf)) ilen = sizeof(ipbuf) - 1;
-            if (ilen > 0) { memcpy(ipbuf, ipstr, ilen); ipbuf[ilen] = '\0'; }
-        }
+            if (ipstr && ipbuf[0] == '\0') {
+                const char *iend = ip_end;
+                if (!iend) { iend = ipstr; while (*iend && *iend != ' ' && *iend != '\t' && *iend != '\n') iend++; }
+                size_t ilen = (size_t)(iend > ipstr ? (size_t)(iend - ipstr) : 0);
+                if (ilen >= sizeof(ipbuf)) ilen = sizeof(ipbuf) - 1;
+                if (ilen > 0) { 
+                    memcpy(ipbuf, ipstr, ilen); ipbuf[ilen] = '\0'; 
+                    // Handle IPv6 bracket notation [2001:db8::1]
+                    if (ipbuf[0] == '[' && ilen > 2 && ipbuf[ilen-1] == ']') {
+                        memmove(ipbuf, ipbuf + 1, ilen - 2);
+                        ipbuf[ilen - 2] = '\0';
+                    }
+                }
+            }
         if (!ipstr) { static const char errm[] = "ERR missing --ip\nEND\n"; (void)sendto(mgmt_fd, errm, sizeof(errm) - 1, 0, (struct sockaddr *)&from, flen); return 0; }
         uint16_t port_list[PROTECTED_PORTS_MAX]; unsigned port_n = 0;
         if (ports_csv && *ports_csv) { port_n = parse_ports_csv(ports_csv, port_list, PROTECTED_PORTS_MAX); }
