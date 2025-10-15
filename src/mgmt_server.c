@@ -20,6 +20,35 @@
 struct rl_entry { unsigned long long last_ts; unsigned int tokens; };
 struct rl6_key { unsigned char src6[16]; };
 
+static void format_timestamp(unsigned long long ns, char *buf, size_t bufsize)
+{
+    if (ns == (unsigned long long)(~0ULL)) {
+        snprintf(buf, bufsize, "never");
+        return;
+    }
+    
+    // Convert monotonic nanoseconds to real time
+    struct timespec now_real, now_mono;
+    clock_gettime(CLOCK_REALTIME, &now_real);
+    clock_gettime(CLOCK_MONOTONIC, &now_mono);
+    
+    // Calculate the offset between real time and monotonic time
+    unsigned long long mono_now_ns = (unsigned long long)now_mono.tv_sec * 1000000000ULL + (unsigned long long)now_mono.tv_nsec;
+    unsigned long long real_now_ns = (unsigned long long)now_real.tv_sec * 1000000000ULL + (unsigned long long)now_real.tv_nsec;
+    unsigned long long offset_ns = real_now_ns - mono_now_ns;
+    
+    // Convert the stored monotonic timestamp to real time
+    unsigned long long real_ns = ns + offset_ns;
+    time_t sec = (time_t)(real_ns / 1000000000ULL);
+    
+    struct tm *tm_info = localtime(&sec);
+    if (tm_info) {
+        strftime(buf, bufsize, "%Y-%m-%dT%H:%M:%S", tm_info);
+    } else {
+        snprintf(buf, bufsize, "invalid");
+    }
+}
+
 static unsigned parse_ports_csv(const char *csv, uint16_t *out_ports, unsigned max_out)
 {
     if (!csv || !*csv || !out_ports || max_out == 0) return 0;
@@ -65,8 +94,11 @@ int mgmt_server_handle(int mgmt_fd,
                     if (bpf_map_lookup_elem(map_fd_v4, &nx, &v) == 0) {
                         struct in_addr a; a.s_addr = nx.src; char ip[INET_ADDRSTRLEN];
                         const char *s = inet_ntop(AF_INET, &a, ip, sizeof(ip));
+                        char allow_time[32], grace_time[32];
+                        format_timestamp(v.allow_expires_at_ns, allow_time, sizeof(allow_time));
+                        format_timestamp(v.grace_expires_at_ns, grace_time, sizeof(grace_time));
                         char line[256];
-                        snprintf(line, sizeof(line), "%s:%u allow=%llu grace=%llu init=%u\n", s ? s : "<v4>", (unsigned)ntohs(nx.dport), (unsigned long long)v.allow_expires_at_ns, (unsigned long long)v.grace_expires_at_ns, (unsigned)v.initialized);
+                        snprintf(line, sizeof(line), "%s:%u allow=%s grace=%s init=%u\n", s ? s : "<v4>", (unsigned)ntohs(nx.dport), allow_time, grace_time, (unsigned)v.initialized);
                         (void)sendto(mgmt_fd, line, strlen(line), 0, (struct sockaddr *)&from, flen);
                     }
                     k = nx;
@@ -78,8 +110,11 @@ int mgmt_server_handle(int mgmt_fd,
                     first = 0;
                     if (bpf_map_lookup_elem(map_fd_v6, &nx6, &v) == 0) {
                         char ip[INET6_ADDRSTRLEN]; const char *s = inet_ntop(AF_INET6, nx6.src6, ip, sizeof(ip));
+                        char allow_time[32], grace_time[32];
+                        format_timestamp(v.allow_expires_at_ns, allow_time, sizeof(allow_time));
+                        format_timestamp(v.grace_expires_at_ns, grace_time, sizeof(grace_time));
                         char line[256];
-                        snprintf(line, sizeof(line), "[%s]:%u allow=%llu grace=%llu init=%u\n", s ? s : "<v6>", (unsigned)ntohs(nx6.dport), (unsigned long long)v.allow_expires_at_ns, (unsigned long long)v.grace_expires_at_ns, (unsigned)v.initialized);
+                        snprintf(line, sizeof(line), "[%s]:%u allow=%s grace=%s init=%u\n", s ? s : "<v6>", (unsigned)ntohs(nx6.dport), allow_time, grace_time, (unsigned)v.initialized);
                         (void)sendto(mgmt_fd, line, strlen(line), 0, (struct sockaddr *)&from, flen);
                     }
                     k6 = nx6;

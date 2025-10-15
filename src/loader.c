@@ -543,6 +543,25 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         if (optind >= argc) { fprintf(stderr, "Usage: %s --manage <list|authorize|allowlist> ...\n", argv[0]); return 1; }
         return manage_main(argc - optind, argv + optind);
 	}
+    // Check for existing instance using PID file BEFORE any network changes
+    const char *pidfile_path = SPALE_PID_FILE;
+    
+    FILE *pidfile = fopen(pidfile_path, "r");
+    if (pidfile) {
+        pid_t existing_pid = 0;
+        if (fscanf(pidfile, "%d", &existing_pid) == 1) {
+            // Check if the PID is still running
+            if (kill(existing_pid, 0) == 0) {
+                fprintf(stderr, "Another spale instance is already running (PID %d)\n", existing_pid);
+                fclose(pidfile);
+                return 1;
+            }
+        }
+        fclose(pidfile);
+        // Remove stale PID file
+        unlink(pidfile_path);
+    }
+
     load_conf_kv_into_env(conf_path);
 
     if (!iface) iface = getenv("IFACE");
@@ -732,6 +751,13 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     if (setup_udp6(spa_port, &s6) != 0) { LOG_ERROR("bind v6 failed on %u", (unsigned)spa_port); return 1; }
     LOG_INFO("Listening for SPA on 0.0.0.0:%u and [::]:%u", (unsigned)spa_port, (unsigned)spa_port);
     
+    // Only create PID file after successful port binding
+    pidfile = fopen(pidfile_path, "w");
+    if (pidfile) {
+        fprintf(pidfile, "%d\n", getpid());
+        fclose(pidfile);
+    }
+    
     // Create management socket as root; pass FD to child after fork
     const char *mgmt_sock_path = NULL;
     int mgmt_fd = setup_mgmt_socket(&mgmt_sock_path);
@@ -792,6 +818,10 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
 
     if (!skip_runtime) { close(s4); close(s6); }
     if (mgmt_fd >= 0) { if (mgmt_sock_path) (void)unlink(mgmt_sock_path); close(mgmt_fd); }
+    
+    // Clean up PID file
+    unlink(pidfile_path);
+    
     // If we are the child, exit now; parent will do privileged cleanup
     if (is_child) {
         if (hpke_ctx) hpke_free(hpke_ctx);

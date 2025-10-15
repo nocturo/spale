@@ -10,6 +10,7 @@
 #define SPALE_PIN_PROTECTED_PORTS    SPALE_PIN_DIR "/protected_ports_set"
 
 #define SPALE_MGMT_SOCK              "/run/spale.sock"
+#define SPALE_PID_FILE               "/run/spale.pid"
 
 #define SPALE_STR_HELPER(x) #x
 #define SPALE_STR(x) SPALE_STR_HELPER(x)
