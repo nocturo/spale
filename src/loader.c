@@ -20,6 +20,9 @@
 #include <sys/prctl.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <getopt.h>
+#include <sys/un.h>
+#include <dirent.h>
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
@@ -29,6 +32,12 @@
 #include "spa_kern.skel.h"
 #include "spa_kern_tc.skel.h"
 #include "hpke.h"
+#include "mgmt_server.h"
+#include "mgmt_client.h"
+#include "always_allow.h"
+#include "logger.h"
+#include "paths.h"
+#include "allow_ops.h"
 #ifndef DEFAULT_CONF_PATH
 #include "config_defaults.h"
 #endif
@@ -99,140 +108,45 @@ static int parse_int_env(const char *key, int defv)
     return atoi(v);
 }
 
-static void parse_always_allow_any(int map_fd_v4, int lpm_fd_v4, int map_fd_v6, int lpm_fd_v6, const struct spa_config *cfg)
+#define REPLAY_HT_CAP 8192u
+#define REPLAY_MAX_PROBE 32u
+static uint64_t replay_table[REPLAY_HT_CAP];
+static unsigned char replay_slot_used[REPLAY_HT_CAP];
+static uint32_t replay_entries = 0;
+
+static uint64_t replay_hash(const HpkePayload *pl)
 {
-    const char *v = getenv("ALWAYS_ALLOW");
-    if (!v || *v == '\0') return;
-    const char *p = v;
-    while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == ',') p++;
-        if (!*p) break;
-        const char *start = p;
-        while (*p && *p != ',') p++;
-        size_t len = (size_t)(p - start);
-        if (len > 0 && len < 128) {
-            char ipbuf[128];
-            memcpy(ipbuf, start, len);
-            ipbuf[len] = '\0';
-
-            char *slash = strchr(ipbuf, '/');
-            struct in_addr a4;
-            bool is_v4_host = false, is_v4_cidr = false;
-            if (slash) {
-                *slash = '\0';
-                int prefix = atoi(slash + 1);
-                if (prefix >= 0 && prefix <= 32 && inet_aton(ipbuf, &a4)) {
-                    is_v4_cidr = true;
-                    if (lpm_fd_v4 >= 0) {
-                        struct lpm_v4 lk = { .prefixlen = (unsigned)prefix, .addr = a4.s_addr };
-                        __u8 one = 1;
-                        (void)bpf_map_update_elem(lpm_fd_v4, &lk, &one, BPF_ANY);
-                    }
-                }
-                *slash = '/';
-            } else if (inet_aton(ipbuf, &a4)) {
-                is_v4_host = true;
-                if (lpm_fd_v4 >= 0) {
-                    struct lpm_v4 lk; memset(&lk, 0, sizeof(lk));
-                    lk.prefixlen = 32; lk.addr = a4.s_addr;
-                    __u8 one = 1;
-                    (void)bpf_map_update_elem(lpm_fd_v4, &lk, &one, BPF_ANY);
-                }
-                struct allowed_entry val; memset(&val, 0, sizeof(val));
-                val.allow_expires_at_ns = (unsigned long long)(~0ULL);
-                val.grace_expires_at_ns = (unsigned long long)(~0ULL);
-                val.initialized = 1;
-                if (cfg && cfg->num_ports > 0) {
-                    for (unsigned int i = 0; i < cfg->num_ports; i++) {
-                        struct allowed_key k; memset(&k, 0, sizeof(k));
-                        k.src = a4.s_addr; k.dport = cfg->protected_ports[i];
-                        (void)bpf_map_update_elem(map_fd_v4, &k, &val, BPF_ANY);
-                    }
-                }
-            }
-
-            if (!(is_v4_host || is_v4_cidr)) {
-                struct in6_addr a6;
-                if (slash) {
-                    *slash = '\0';
-                    int prefix = atoi(slash + 1);
-                    if (prefix >= 0 && prefix <= 128 && inet_pton(AF_INET6, ipbuf, &a6) == 1) {
-                        if (lpm_fd_v6 >= 0) {
-                            struct lpm_v6 lk; memset(&lk, 0, sizeof(lk));
-                            lk.prefixlen = (unsigned)prefix;
-                            memcpy(lk.addr, &a6, 16);
-                            __u8 one = 1;
-                            (void)bpf_map_update_elem(lpm_fd_v6, &lk, &one, BPF_ANY);
-                        }
-                    }
-                    *slash = '/';
-                } else if (inet_pton(AF_INET6, ipbuf, &a6) == 1) {
-                    if (lpm_fd_v6 >= 0) {
-                        struct lpm_v6 lk; memset(&lk, 0, sizeof(lk));
-                        lk.prefixlen = 128; memcpy(lk.addr, &a6, 16);
-                        __u8 one = 1;
-                        (void)bpf_map_update_elem(lpm_fd_v6, &lk, &one, BPF_ANY);
-                    }
-                    struct allowed_entry val; memset(&val, 0, sizeof(val));
-                    val.allow_expires_at_ns = (unsigned long long)(~0ULL);
-                    val.grace_expires_at_ns = (unsigned long long)(~0ULL);
-                    val.initialized = 1;
-                    if (cfg && cfg->num_ports > 0) {
-                        for (unsigned int i = 0; i < cfg->num_ports; i++) {
-                            struct allowed6_key k; memset(&k, 0, sizeof(k));
-                            memcpy(k.src6, &a6, 16);
-                            k.dport = cfg->protected_ports[i];
-                            (void)bpf_map_update_elem(map_fd_v6, &k, &val, BPF_ANY);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    /* FNV-1a 64-bit over client_pub || time_step (BE) || nonce */
+    const uint64_t FNV_OFF = 14695981039346656037ull;
+    const uint64_t FNV_PRIME = 1099511628211ull;
+    uint64_t h = FNV_OFF;
+    for (uint32_t i = 0; i < pl->client_pub_len; i++) { h ^= pl->client_pub[i]; h *= FNV_PRIME; }
+    uint8_t tsb[4]; tsb[0] = (uint8_t)((pl->time_step >> 24) & 0xFF); tsb[1] = (uint8_t)((pl->time_step >> 16) & 0xFF); tsb[2] = (uint8_t)((pl->time_step >> 8) & 0xFF); tsb[3] = (uint8_t)(pl->time_step & 0xFF);
+    for (int i = 0; i < 4; i++) { h ^= tsb[i]; h *= FNV_PRIME; }
+    for (uint32_t i = 0; i < pl->nonce_len; i++) { h ^= pl->nonce[i]; h *= FNV_PRIME; }
+    return h;
 }
-
-typedef struct {
-	uint8_t client_pub[32];
-	uint32_t client_pub_len;
-	uint32_t time_step;
-	uint8_t nonce[16];
-	uint32_t nonce_len;
-	uint64_t added_ts;
-} ReplayEntry;
-
-#define REPLAY_CAP 4096
-static ReplayEntry replay_cache[REPLAY_CAP];
-static uint32_t replay_size = 0;
-static uint32_t replay_rr_idx = 0;
 
 static bool replay_seen_and_mark(const HpkePayload *pl)
 {
-	uint64_t now_ns = (uint64_t)time(NULL) * 1000000000ull;
-	for (uint32_t i = 0; i < replay_size; i++) {
-		ReplayEntry *e = &replay_cache[i];
-		if (e->client_pub_len == pl->client_pub_len &&
-			memcmp(e->client_pub, pl->client_pub, pl->client_pub_len) == 0 &&
-			e->time_step == pl->time_step &&
-			e->nonce_len == pl->nonce_len &&
-			memcmp(e->nonce, pl->nonce, pl->nonce_len) == 0) {
-			return true; // replay
-		}
-	}
-    // insert or replace using round-robin when full
-    uint32_t idx;
-    if (replay_size < REPLAY_CAP) {
-        idx = replay_size++;
+    uint64_t tag = replay_hash(pl);
+    uint32_t mask = REPLAY_HT_CAP - 1u;
+    uint32_t idx = (uint32_t)tag & mask;
+    for (uint32_t i = 0; i < REPLAY_MAX_PROBE; i++) {
+        uint32_t p = (idx + i) & mask;
+        if (replay_slot_used[p]) {
+            if (replay_table[p] == tag) return true; /* replay */
     } else {
-        idx = replay_rr_idx;
-        replay_rr_idx = (replay_rr_idx + 1) % REPLAY_CAP;
+            replay_table[p] = tag;
+            replay_slot_used[p] = 1;
+            if (replay_entries < REPLAY_HT_CAP) replay_entries++;
+            return false;
+        }
     }
-	ReplayEntry *e = &replay_cache[idx];
-	e->client_pub_len = pl->client_pub_len;
-	memcpy(e->client_pub, pl->client_pub, pl->client_pub_len);
-	e->time_step = pl->time_step;
-	e->nonce_len = pl->nonce_len;
-	memcpy(e->nonce, pl->nonce, pl->nonce_len);
-	e->added_ts = now_ns;
+    /* table is dense around idx; overwrite base slot */
+    replay_table[idx] = tag;
+    replay_slot_used[idx] = 1;
+    if (replay_entries < REPLAY_HT_CAP) replay_entries++;
 	return false;
 }
 
@@ -321,10 +235,24 @@ static int drop_privileges(uid_t uid, gid_t gid)
 }
 
 
-static void build_hpke_aad(uint8_t aad[16])
+#define HPKE_AAD_LEN 7
+static void build_hpke_aad(uint8_t aad[HPKE_AAD_LEN])
 {
-    memset(aad, 0, 16);
+    memset(aad, 0, HPKE_AAD_LEN);
     aad[6] = 1;
+}
+
+static size_t build_client_env_prefix(const HpkePayload *pl, char *cid_upper, size_t cid_upper_len)
+{
+    if (!pl || pl->client_id_len == 0 || !cid_upper || cid_upper_len == 0) return 0;
+    size_t cu_len = pl->client_id_len < cid_upper_len - 1 ? pl->client_id_len : cid_upper_len - 1;
+    for (size_t i = 0; i < cu_len; i++) {
+        char c = (char)pl->client_id[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        cid_upper[i] = c;
+    }
+    cid_upper[cu_len] = '\0';
+    return cu_len;
 }
 
 static bool hpke_try_decrypt(HpkeContext *hpke_ctx,
@@ -332,9 +260,11 @@ static bool hpke_try_decrypt(HpkeContext *hpke_ctx,
                              size_t cipher_len,
                              HpkePayload *out_pl)
 {
-    uint8_t aad[16];
+    uint8_t aad[HPKE_AAD_LEN];
     build_hpke_aad(aad);
-    return hpke_verify_and_decrypt(hpke_ctx, aad, 7, cipher, cipher_len, out_pl);
+    bool ok = hpke_verify_and_decrypt(hpke_ctx, aad, HPKE_AAD_LEN, cipher, cipher_len, out_pl);
+    if (!ok) LOG_WARN("HPKE decrypt failed (len=%zu)", cipher_len);
+    return ok;
 }
 
 static void apply_client_env_overrides(const HpkePayload *pl, struct allowed_entry *val)
@@ -342,13 +272,8 @@ static void apply_client_env_overrides(const HpkePayload *pl, struct allowed_ent
     if (!pl || pl->client_id_len == 0) return;
     char envk[128];
     char cid_upper[80];
-    size_t cu_len = pl->client_id_len < sizeof(cid_upper) - 1 ? pl->client_id_len : sizeof(cid_upper) - 1;
-    for (size_t i = 0; i < cu_len; i++) {
-        char c = (char)pl->client_id[i];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-        cid_upper[i] = c;
-    }
-    cid_upper[cu_len] = '\0';
+    size_t cu_len = build_client_env_prefix(pl, cid_upper, sizeof(cid_upper));
+    if (cu_len == 0) return;
 
     snprintf(envk, sizeof(envk), "%s_IDLE_SEC", cid_upper);
     const char *v = getenv(envk);
@@ -372,19 +297,18 @@ static unsigned load_client_ports_from_env_and_filter(const HpkePayload *pl,
     if (!pl || pl->client_id_len == 0) return 0;
     char envk[128];
     char cid_upper[80];
-    size_t cu_len = pl->client_id_len < sizeof(cid_upper) - 1 ? pl->client_id_len : sizeof(cid_upper) - 1;
-    for (size_t i = 0; i < cu_len; i++) {
-        char c = (char)pl->client_id[i];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-        cid_upper[i] = c;
-    }
-    cid_upper[cu_len] = '\0';
+    size_t cu_len = build_client_env_prefix(pl, cid_upper, sizeof(cid_upper));
+    if (cu_len == 0) return 0;
 
     snprintf(envk, sizeof(envk), "%s_PORTS", cid_upper);
     const char *v = getenv(envk);
-    if (!v || !*v) return 0;
+    if (!v || !*v) {
+        LOG_WARN("No client ports env for key %s", envk);
+        return 0;
+    }
 
     unsigned client_n = parse_ports_csv(v, out_ports, max_out);
+    LOG_INFO("Client %s requested %u port(s) via %s", cid_upper, client_n, envk);
     for (unsigned i = 0; i < client_n;) {
         if (!port_in_cfg_list(out_ports[i], cfg)) {
             for (unsigned j = i + 1; j < client_n; j++) out_ports[j - 1] = out_ports[j];
@@ -393,55 +317,8 @@ static unsigned load_client_ports_from_env_and_filter(const HpkePayload *pl,
             i++;
         }
     }
+    LOG_INFO("Client %s authorized %u port(s) after filter", cid_upper, client_n);
     return client_n;
-}
-
-static unsigned authorize_ipv4(int map_fd,
-                               __u32 src_ip,
-                               const struct spa_config *cfg,
-                               const uint16_t *client_ports,
-                               unsigned client_n,
-                               const struct allowed_entry *val)
-{
-    unsigned wrote = 0;
-    if (client_n > 0) {
-        for (unsigned i = 0; i < client_n; i++) {
-            struct allowed_key ak; memset(&ak, 0, sizeof(ak));
-            ak.src = src_ip; ak.dport = htons(client_ports[i]);
-            if (bpf_map_update_elem(map_fd, &ak, val, BPF_ANY) == 0) wrote++;
-        }
-    } else if (cfg->num_ports > 0) {
-        for (unsigned i = 0; i < cfg->num_ports; i++) {
-            struct allowed_key ak; memset(&ak, 0, sizeof(ak));
-            ak.src = src_ip; ak.dport = cfg->protected_ports[i];
-            if (bpf_map_update_elem(map_fd, &ak, val, BPF_ANY) == 0) wrote++;
-        }
-    }
-    return wrote;
-}
-
-static unsigned authorize_ipv6(int map_fd,
-                               const struct in6_addr *src6,
-                               const struct spa_config *cfg,
-                               const uint16_t *client_ports,
-                               unsigned client_n,
-                               const struct allowed_entry *val)
-{
-    unsigned wrote = 0;
-    if (client_n > 0) {
-        for (unsigned i = 0; i < client_n; i++) {
-            struct allowed6_key ak; memset(&ak, 0, sizeof(ak));
-            memcpy(ak.src6, src6, 16); ak.dport = htons(client_ports[i]);
-            if (bpf_map_update_elem(map_fd, &ak, val, BPF_ANY) == 0) wrote++;
-        }
-    } else if (cfg->num_ports > 0) {
-        for (unsigned i = 0; i < cfg->num_ports; i++) {
-            struct allowed6_key ak; memset(&ak, 0, sizeof(ak));
-            memcpy(ak.src6, src6, 16); ak.dport = cfg->protected_ports[i];
-            if (bpf_map_update_elem(map_fd, &ak, val, BPF_ANY) == 0) wrote++;
-        }
-    }
-    return wrote;
 }
 
 static int setup_udp4(uint16_t port, int *out_fd)
@@ -481,28 +358,36 @@ struct loop_ctx {
     const struct spa_config *cfg;
     int map_fd_v4;
     int map_fd_v6;
+    int map_always_v4;
+    int map_always_v6;
+    int map_ports_set;
+    int map_config;
+    int map_rl_v4;
+    int map_rl_v6;
     int s4;
     int s6;
+    int mgmt_fd;
 };
 
-static void process_spa_v4(const struct loop_ctx *ctx)
+static void process_spa_generic(const struct loop_ctx *ctx, int af, int sock_fd)
 {
     char buf[256];
+    ssize_t n = -1;
+    if (af == AF_INET) {
     struct sockaddr_in peer; socklen_t plen = sizeof(peer);
-    ssize_t n = recvfrom(ctx->s4, buf, sizeof(buf) - 1, MSG_DONTWAIT, (struct sockaddr *)&peer, &plen);
+        n = recvfrom(sock_fd, buf, sizeof(buf) - 1, MSG_DONTWAIT, (struct sockaddr *)&peer, &plen);
     if (n < 0) return;
     buf[n] = '\0';
-    fprintf(stderr, "SPA from %s: %zd bytes\n", inet_ntoa(peer.sin_addr), n);
+    LOG_DEBUG("SPA from %s: %zd bytes", inet_ntoa(peer.sin_addr), n);
 
     HpkePayload pl;
     bool ok = hpke_try_decrypt(ctx->hpke_ctx, (const uint8_t *)buf, (size_t)n, &pl);
-    if (ok && replay_seen_and_mark(&pl)) ok = false;
+    if (ok && replay_seen_and_mark(&pl)) { LOG_WARN("HPKE replay detected"); ok = false; }
     if (!ok) return;
 
-    __u32 src_ip = peer.sin_addr.s_addr;
     struct allowed_entry val; memset(&val, 0, sizeof(val));
-    struct timespec ts_now_v4; clock_gettime(CLOCK_MONOTONIC, &ts_now_v4);
-    uint64_t now_ns = (uint64_t)ts_now_v4.tv_sec * 1000000000ull + (uint64_t)ts_now_v4.tv_nsec;
+        struct timespec ts_now; clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        uint64_t now_ns = (uint64_t)ts_now.tv_sec * 1000000000ull + (uint64_t)ts_now.tv_nsec;
     val.allow_expires_at_ns = now_ns + ctx->cfg->idle_extend_ns;
     val.grace_expires_at_ns = now_ns + ctx->cfg->post_disconnect_grace_ns;
     val.initialized = 1;
@@ -510,25 +395,21 @@ static void process_spa_v4(const struct loop_ctx *ctx)
 
     uint16_t client_ports[PROTECTED_PORTS_MAX];
     unsigned client_n = load_client_ports_from_env_and_filter(&pl, ctx->cfg, client_ports, PROTECTED_PORTS_MAX);
-    unsigned wrote = authorize_ipv4(ctx->map_fd_v4, src_ip, ctx->cfg, client_ports, client_n, &val);
-    printf("Authorized %s for %u port(s)\n", inet_ntoa(peer.sin_addr), wrote);
-}
-
-static void process_spa_v6(const struct loop_ctx *ctx)
-{
-    char buf[256];
+        unsigned wrote = authorize_addr(AF_INET, ctx->map_fd_v4, ctx->map_fd_v6, &peer.sin_addr.s_addr, ctx->cfg, client_ports, client_n, &val);
+    LOG_INFO("Authorized %s for %u port(s)", inet_ntoa(peer.sin_addr), wrote);
+    } else if (af == AF_INET6) {
     struct sockaddr_in6 peer6; socklen_t plen6 = sizeof(peer6);
-    ssize_t n2 = recvfrom(ctx->s6, buf, sizeof(buf) - 1, MSG_DONTWAIT, (struct sockaddr *)&peer6, &plen6);
-    if (n2 < 0) return;
-    buf[n2] = '\0';
+        n = recvfrom(sock_fd, buf, sizeof(buf) - 1, MSG_DONTWAIT, (struct sockaddr *)&peer6, &plen6);
+        if (n < 0) return;
+        buf[n] = '\0';
     char abuf[INET6_ADDRSTRLEN];
     const char *astr = inet_ntop(AF_INET6, &peer6.sin6_addr, abuf, sizeof(abuf));
     if (!astr) astr = "<ipv6>";
-    fprintf(stderr, "SPA from [%s]: %zd bytes\n", astr, n2);
+        LOG_DEBUG("SPA from [%s]: %zd bytes", astr, n);
 
     HpkePayload pl2;
-    bool ok2 = hpke_try_decrypt(ctx->hpke_ctx, (const uint8_t *)buf, (size_t)n2, &pl2);
-    if (ok2 && replay_seen_and_mark(&pl2)) ok2 = false;
+        bool ok2 = hpke_try_decrypt(ctx->hpke_ctx, (const uint8_t *)buf, (size_t)n, &pl2);
+    if (ok2 && replay_seen_and_mark(&pl2)) { LOG_WARN("HPKE replay detected (v6)"); ok2 = false; }
     if (!ok2) return;
 
     struct allowed_entry val; memset(&val, 0, sizeof(val));
@@ -541,25 +422,65 @@ static void process_spa_v6(const struct loop_ctx *ctx)
 
     uint16_t client_ports[PROTECTED_PORTS_MAX];
     unsigned client_n = load_client_ports_from_env_and_filter(&pl2, ctx->cfg, client_ports, PROTECTED_PORTS_MAX);
-    unsigned wrote = authorize_ipv6(ctx->map_fd_v6, &peer6.sin6_addr, ctx->cfg, client_ports, client_n, &val);
-    printf("Authorized [%s] for %u port(s)\n", astr, wrote);
+        unsigned wrote = authorize_addr(AF_INET6, ctx->map_fd_v4, ctx->map_fd_v6, &peer6.sin6_addr, ctx->cfg, client_ports, client_n, &val);
+    LOG_INFO("Authorized [%s] for %u port(s)", astr, wrote);
+    }
+}
+
+static void process_spa_v4(const struct loop_ctx *ctx)
+{
+    process_spa_generic(ctx, AF_INET, ctx->s4);
+}
+
+static void process_spa_v6(const struct loop_ctx *ctx)
+{
+    process_spa_generic(ctx, AF_INET6, ctx->s6);
 }
 
 static void run_poll_loop(const struct loop_ctx *ctx)
 {
-    struct pollfd pfds[2] = { { .fd = ctx->s4, .events = POLLIN }, { .fd = ctx->s6, .events = POLLIN } };
+    struct pollfd pfds[3];
+    pfds[0].fd = ctx->s4; pfds[0].events = POLLIN;
+    pfds[1].fd = ctx->s6; pfds[1].events = POLLIN;
+    pfds[2].fd = ctx->mgmt_fd; pfds[2].events = POLLIN;
     while (keep_running) {
-        int pr = poll(pfds, 2, 500);
+        int pr = poll(pfds, 3, 500);
         if (!keep_running) break;
         if (pr < 0) {
             if (errno == EINTR) continue;
-            perror("poll");
+            LOG_ERROR("poll failed: %s", strerror(errno));
             break;
         }
         if (pr == 0) continue;
         if (pfds[0].revents & POLLIN) process_spa_v4(ctx);
         if (pfds[1].revents & POLLIN) process_spa_v6(ctx);
+        if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
+            (void)mgmt_server_handle(pfds[2].fd, ctx->cfg,
+                                     ctx->map_fd_v4, ctx->map_fd_v6,
+                                     ctx->map_always_v4, ctx->map_always_v6,
+                                     ctx->map_ports_set, ctx->map_config,
+                                     ctx->map_rl_v4, ctx->map_rl_v6);
+        }
     }
+}
+
+static int setup_mgmt_socket(const char **out_path)
+{
+    if (out_path) *out_path = NULL;
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr; memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    const char *sock_path = SPALE_MGMT_SOCK;
+    memset(addr.sun_path, 0, sizeof(addr.sun_path));
+    (void)snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
+    (void)unlink(addr.sun_path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { int e = errno; close(fd); errno = e; return -1; }
+    // Restrict access to root only
+    (void)chmod(sock_path, 0600);
+    int flags = fcntl(fd, F_GETFL, 0); if (flags >= 0) (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (out_path) *out_path = sock_path;
+    return fd;
 }
 
 int main(int argc, char **argv) {
@@ -567,19 +488,36 @@ int main(int argc, char **argv) {
 	uint16_t spa_port = 0;
     const char *server_key_path = NULL;
     const char *clients_path = NULL;
-    const char *conf_path = DEFAULT_CONF_PATH;
+    const char *conf_path = SPALE_DEFAULT_CONF_PATH;
     enum { MODE_XDP, MODE_TC } mode = MODE_TC;
     uint32_t idle_sec = 60;
 	uint32_t grace_sec = 300;
     bool log_only = false;
+    bool manage_mode = false;
     const char *drop_privs_arg = NULL;
     uid_t drop_uid = (uid_t)-1; gid_t drop_gid = (gid_t)-1;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
 
+    // Check for manage mode first to avoid parsing manage-specific options
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--manage") == 0) {
+            manage_mode = true;
+            if (i + 1 >= argc) { fprintf(stderr, "Usage: %s --manage <list|authorize|allowlist> ...\n", argv[0]); return 1; }
+            return manage_main(argc - i - 1, argv + i + 1);
+        }
+    }
+
 bool pin_maps = false;
-int opt;
-while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
+static struct option long_opts[] = {
+    {"server-key", required_argument, 0, 1000},
+    {"clients", required_argument, 0, 1001},
+    {"drop-privs", required_argument, 0, 1002},
+    {"manage", no_argument, 0, 1003},
+    {0, 0, 0, 0}
+};
+int opt, longidx = 0;
+while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) != -1) {
 		switch (opt) {
         case 'c': conf_path = optarg; break;
 		case 'i': iface = optarg; break;
@@ -593,13 +531,17 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         else if (strcmp(optarg, "tc") == 0) mode = MODE_TC;
         else { usage(argv[0]); return 1; }
         break;
-    case '-':
-        if (strcmp(optarg, "server-key") == 0 && optind < argc) { server_key_path = argv[optind++]; break; }
-        if (strcmp(optarg, "clients") == 0 && optind < argc) { clients_path = argv[optind++]; break; }
-        if (strcmp(optarg, "drop-privs") == 0 && optind < argc) { drop_privs_arg = argv[optind++]; break; }
-        usage(argv[0]); return 1;
+        case 1000: server_key_path = optarg; break;
+        case 1001: clients_path = optarg; break;
+        case 1002: drop_privs_arg = optarg; break;
+        case 1003: manage_mode = true; break;
 		default: usage(argv[0]); return 1;
 		}
+	}
+    if (manage_mode) {
+        // Delegate to manage subcommand parser
+        if (optind >= argc) { fprintf(stderr, "Usage: %s --manage <list|authorize|allowlist> ...\n", argv[0]); return 1; }
+        return manage_main(argc - optind, argv + optind);
 	}
     load_conf_kv_into_env(conf_path);
 
@@ -607,8 +549,8 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
     if (spa_port == 0) { const char *sp = getenv("LISTEN_PORT"); if (sp) spa_port = (uint16_t)atoi(sp); }
     if (!server_key_path) server_key_path = getenv("SERVER_KEY");
     if (!clients_path) clients_path = getenv("CLIENTS_DIR");
-    if (!server_key_path) server_key_path = DEFAULT_SERVER_KEY;
-    if (!clients_path) clients_path = DEFAULT_CLIENTS_DIR;
+    if (!server_key_path) server_key_path = SPALE_DEFAULT_SERVER_KEY;
+    if (!clients_path) clients_path = SPALE_DEFAULT_CLIENTS_DIR;
     {
         const char *m = getenv("MODE");
         if (m) { if (strcmp(m, "xdp") == 0) mode = MODE_XDP; else if (strcmp(m, "tc") == 0) mode = MODE_TC; }
@@ -625,19 +567,19 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
 
     HpkeContext *hpke_ctx = NULL;
     if (!server_key_path || !clients_path) {
-        fprintf(stderr, "require --server-key and --clients (directory of PEMs)\n");
+        LOG_ERROR("require --server-key and --clients (directory of PEMs)");
         return 1;
     }
     char errbuf[256] = {0};
     hpke_ctx = hpke_init(server_key_path, clients_path, errbuf, sizeof(errbuf));
     if (!hpke_ctx) {
-        fprintf(stderr, "HPKE init failed: %s\n", errbuf[0]?errbuf:"unknown");
+        LOG_ERROR("HPKE init failed: %s", errbuf[0]?errbuf:"unknown");
         return 1;
     }
-    fprintf(stderr, "HPKE auth enabled (server-key=%s, clients=%s)\n", server_key_path, clients_path);
+    LOG_INFO("HPKE auth enabled (server-key=%s, clients=%s)", server_key_path, clients_path);
 
 	int ifindex = if_nametoindex(iface);
-	if (ifindex == 0) { perror("if_nametoindex"); return 1; }
+    if (ifindex == 0) { LOG_ERROR("if_nametoindex failed for %s", iface); return 1; }
 
     libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
     struct sigaction sa; memset(&sa, 0, sizeof(sa));
@@ -649,19 +591,19 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
     struct spa_kern_tc_bpf *tc_skel = NULL;
     if (mode == MODE_XDP) {
         xdp_skel = spa_kern_bpf__open();
-        if (!xdp_skel) { fprintf(stderr, "Failed to open XDP BPF skeleton\n"); return 1; }
-        if (spa_kern_bpf__load(xdp_skel)) { fprintf(stderr, "Failed to load XDP BPF\n"); return 1; }
+        if (!xdp_skel) { LOG_ERROR("Failed to open XDP BPF skeleton"); return 1; }
+        if (spa_kern_bpf__load(xdp_skel)) { LOG_ERROR("Failed to load XDP BPF"); return 1; }
     } else {
         tc_skel = spa_kern_tc_bpf__open();
-        if (!tc_skel) { fprintf(stderr, "Failed to open TC BPF skeleton\n"); return 1; }
-        if (spa_kern_tc_bpf__load(tc_skel)) { fprintf(stderr, "Failed to load TC BPF\n"); return 1; }
+        if (!tc_skel) { LOG_ERROR("Failed to open TC BPF skeleton"); return 1; }
+        if (spa_kern_tc_bpf__load(tc_skel)) { LOG_ERROR("Failed to load TC BPF"); return 1; }
     }
 
-    const char *pin_dir = "/sys/fs/bpf/spale";
-    const char *allowed_path = "/sys/fs/bpf/spale/allowed_ipv4";
-    const char *allowed6_path = "/sys/fs/bpf/spale/allowed_ipv6";
-    const char *config_path  = "/sys/fs/bpf/spale/config_map";
-    const char *ppset_path   = "/sys/fs/bpf/spale/protected_ports_set";
+    const char *pin_dir = SPALE_PIN_DIR;
+    const char *allowed_path = SPALE_PIN_ALLOWED_V4;
+    const char *allowed6_path = SPALE_PIN_ALLOWED_V6;
+    const char *config_path  = SPALE_PIN_CONFIG_MAP;
+    const char *ppset_path   = SPALE_PIN_PROTECTED_PORTS;
     if (pin_maps) {
         (void)mkdir("/sys/fs/bpf", 0755);
         (void)mkdir(pin_dir, 0755);
@@ -670,28 +612,28 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         (void)unlink(allowed6_path);
         (void)unlink(config_path);
         if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.allowed_ipv4, allowed_path) : bpf_map__pin(tc_skel->maps.allowed_ipv4, allowed_path)) {
-            fprintf(stderr, "Warning: could not pin allowed_ipv4 map: %s\n", strerror(errno));
+            LOG_WARN("could not pin allowed_ipv4 map: %s", strerror(errno));
         }
         if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.allowed_ipv6, allowed6_path) : bpf_map__pin(tc_skel->maps.allowed_ipv6, allowed6_path)) {
-            fprintf(stderr, "Warning: could not pin allowed_ipv6 map: %s\n", strerror(errno));
+            LOG_WARN("could not pin allowed_ipv6 map: %s", strerror(errno));
         }
         if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.config_map, config_path) : bpf_map__pin(tc_skel->maps.config_map, config_path)) {
-            fprintf(stderr, "Warning: could not pin config_map: %s\n", strerror(errno));
+            LOG_WARN("could not pin config_map: %s", strerror(errno));
         }
         (void)unlink(ppset_path);
         if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.protected_ports_set, ppset_path) : bpf_map__pin(tc_skel->maps.protected_ports_set, ppset_path)) {
-            fprintf(stderr, "Warning: could not pin protected_ports_set: %s\n", strerror(errno));
+            LOG_WARN("could not pin protected_ports_set: %s", strerror(errno));
         }
     }
 
     if (drop_privs_arg) {
         if (parse_user_group(drop_privs_arg, &drop_uid, &drop_gid) != 0) {
-            fprintf(stderr, "invalid --drop-privs argument: %s\n", drop_privs_arg);
+            LOG_ERROR("invalid --drop-privs argument: %s", drop_privs_arg);
             return 1;
         }
         if (pin_maps) {
             if (chown_pin_dir(pin_dir, drop_uid, drop_gid) != 0) {
-                fprintf(stderr, "warning: failed to chown %s to %u:%u, unpin at exit may fail\n", pin_dir, (unsigned)drop_uid, (unsigned)drop_gid);
+                LOG_WARN("failed to chown %s to %u:%u, unpin at exit may fail", pin_dir, (unsigned)drop_uid, (unsigned)drop_gid);
             }
         }
     }
@@ -723,7 +665,7 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
 
 	__u32 idx0 = 0;
     if (bpf_map_update_elem(bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map), &idx0, &cfg, BPF_ANY) != 0) {
-		fprintf(stderr, "Failed to set config: %s\n", strerror(errno));
+		LOG_ERROR("Failed to set config: %s", strerror(errno));
 		return 1;
 	}
 
@@ -738,7 +680,8 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         }
     }
 
-    parse_always_allow_any(
+    always_allow_parse_and_apply(
+        getenv("ALWAYS_ALLOW"),
         bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv4 : tc_skel->maps.allowed_ipv4),
         bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v4 : tc_skel->maps.always_allow_v4),
         bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv6 : tc_skel->maps.allowed_ipv6),
@@ -753,12 +696,12 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         if (bpf_xdp_attach(ifindex, bpf_program__fd(xdp_skel->progs.xdp_spa), xdp_flags, NULL) != 0) {
             xdp_flags = XDP_FLAGS_DRV_MODE;
             if (bpf_xdp_attach(ifindex, bpf_program__fd(xdp_skel->progs.xdp_spa), xdp_flags, NULL) != 0) {
-                perror("bpf_xdp_attach");
+                LOG_ERROR("bpf_xdp_attach failed (drv+skb)");
                 return 1;
             }
         }
         unsigned pro_count = cfg.num_ports;
-        printf("Attached XDP(%s) to %s, protecting %u port(s), SPA on %u\n",
+        LOG_INFO("Attached XDP(%s) to %s, protecting %u port(s), SPA on %u",
                (xdp_flags == XDP_FLAGS_DRV_MODE ? "drv" : "skb"), iface, pro_count, spa_port);
     } else {
         tc_hook.sz = sizeof(tc_hook);
@@ -766,7 +709,7 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         tc_hook.attach_point = BPF_TC_INGRESS;
         int herr = bpf_tc_hook_create(&tc_hook);
         if (herr && herr != -EEXIST) {
-            fprintf(stderr, "Failed to create tc hook (ensure clsact qdisc is available): %s\n", strerror(-herr));
+            LOG_ERROR("Failed to create tc hook (ensure clsact qdisc is available): %s", strerror(-herr));
             return 1;
         }
         tc_opts.sz = sizeof(tc_opts);
@@ -776,30 +719,40 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
         tc_opts.flags = BPF_TC_F_REPLACE;
         int aerr = bpf_tc_attach(&tc_hook, &tc_opts);
         if (aerr) {
-            fprintf(stderr, "Failed to attach tc program: %s\n", strerror(-aerr));
+            LOG_ERROR("Failed to attach tc program: %s", strerror(-aerr));
             (void)bpf_tc_hook_destroy(&tc_hook);
             return 1;
         }
         unsigned pro_count = cfg.num_ports;
-        printf("Attached TC ingress to %s, protecting %u port(s), SPA on %u\n", iface, pro_count, spa_port);
+        LOG_INFO("Attached TC ingress to %s, protecting %u port(s), SPA on %u", iface, pro_count, spa_port);
     }
 
     int s4 = -1, s6 = -1;
-	if (setup_udp4(spa_port, &s4) != 0) { perror("bind v4"); return 1; }
-	if (setup_udp6(spa_port, &s6) != 0) { perror("bind v6"); return 1; }
-	printf("Listening for SPA on 0.0.0.0:%u and [::]:%u\n", (unsigned)spa_port, (unsigned)spa_port);
+    if (setup_udp4(spa_port, &s4) != 0) { LOG_ERROR("bind v4 failed on %u", (unsigned)spa_port); return 1; }
+    if (setup_udp6(spa_port, &s6) != 0) { LOG_ERROR("bind v6 failed on %u", (unsigned)spa_port); return 1; }
+    LOG_INFO("Listening for SPA on 0.0.0.0:%u and [::]:%u", (unsigned)spa_port, (unsigned)spa_port);
+    
+    // Create management socket as root; pass FD to child after fork
+    const char *mgmt_sock_path = NULL;
+    int mgmt_fd = setup_mgmt_socket(&mgmt_sock_path);
+    if (mgmt_fd < 0) {
+        LOG_ERROR("Another spale instance appears to be running (management socket busy)");
+        return 1;
+    }
+    LOG_INFO("management socket: %s", mgmt_sock_path);
     
     bool is_child = false;
     pid_t child_pid = -1;
     bool skip_runtime = false;
     if (drop_privs_arg) {
         child_pid = fork();
-        if (child_pid < 0) { perror("fork"); return 1; }
+        if (child_pid < 0) { LOG_ERROR("fork failed: %s", strerror(errno)); return 1; }
         if (child_pid > 0) {
             // Parent: close sockets and wait for child to finish before cleanup
             skip_runtime = true;
             close(s4);
             close(s6);
+            if (mgmt_fd >= 0) { close(mgmt_fd); }
         } else {
             // Child: will drop privileges and run
             is_child = true;
@@ -809,10 +762,10 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
     // Drop privileges in child process only (or in single process if no fork)
     if (drop_privs_arg && is_child) {
         if (drop_privileges(drop_uid, drop_gid) != 0) {
-            fprintf(stderr, "failed to drop privileges to %u:%u\n", (unsigned)drop_uid, (unsigned)drop_gid);
+            LOG_ERROR("failed to drop privileges to %u:%u", (unsigned)drop_uid, (unsigned)drop_gid);
             return 1;
         }
-        fprintf(stderr, "dropped privileges to uid=%u gid=%u\n", (unsigned)getuid(), (unsigned)getgid());
+        LOG_INFO("dropped privileges to uid=%u gid=%u", (unsigned)getuid(), (unsigned)getgid());
     }
 
 	struct loop_ctx lctx;
@@ -820,8 +773,15 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
 	lctx.cfg = &cfg;
 	lctx.map_fd_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv4 : tc_skel->maps.allowed_ipv4);
 	lctx.map_fd_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv6 : tc_skel->maps.allowed_ipv6);
+    lctx.map_always_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v4 : tc_skel->maps.always_allow_v4);
+    lctx.map_always_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v6 : tc_skel->maps.always_allow_v6);
+    lctx.map_ports_set = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.protected_ports_set : tc_skel->maps.protected_ports_set);
+    lctx.map_config = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map);
+    lctx.map_rl_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl : tc_skel->maps.spa_rl);
+    lctx.map_rl_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl6 : tc_skel->maps.spa_rl6);
 	lctx.s4 = s4;
 	lctx.s6 = s6;
+    lctx.mgmt_fd = mgmt_fd;
 
     if (!skip_runtime) {
         run_poll_loop(&lctx);
@@ -831,6 +791,7 @@ while ((opt = getopt(argc, argv, "c:i:S:t:g:pm:n-:")) != -1) {
     }
 
     if (!skip_runtime) { close(s4); close(s6); }
+    if (mgmt_fd >= 0) { if (mgmt_sock_path) (void)unlink(mgmt_sock_path); close(mgmt_fd); }
     // If we are the child, exit now; parent will do privileged cleanup
     if (is_child) {
         if (hpke_ctx) hpke_free(hpke_ctx);
