@@ -51,11 +51,16 @@ $(SKEL_TC): $(TCBPFOBJ)
 	$(BPFTOOL) gen skeleton $< > $@
 
 
-$(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c $(SKEL) $(SKEL_TC) include/spa_common.h
+$(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c src/mgmt_server.c src/mgmt_client.c src/logger.c src/allow_ops.c src/always_allow.c $(SKEL) $(SKEL_TC) include/spa_common.h include/mgmt_server.h include/mgmt_client.h include/logger.h include/allow_ops.h include/always_allow.h
 	@mkdir -p build
-	$(CC) $(USR_CFLAGS) -DDEFAULT_SYSCONFDIR=\"$(SYSCONFDIR)\" -DDEFAULT_CONF_PATH=\"$(SYSCONFDIR)/spale.conf\" -DDEFAULT_SERVER_KEY=\"$(SYSCONFDIR)/server.key\" -DDEFAULT_CLIENTS_DIR=\"$(SYSCONFDIR)/clients\" -Iinclude -Isrc -c src/loader.c -o build/loader.o
+	$(CC) $(USR_CFLAGS) -DDEFAULT_SYSCONFDIR="$(SYSCONFDIR)" -DDEFAULT_CONF_PATH="$(SYSCONFDIR)/spale.conf" -DDEFAULT_SERVER_KEY="$(SYSCONFDIR)/server.key" -DDEFAULT_CLIENTS_DIR="$(SYSCONFDIR)/clients" -Iinclude -Isrc -c src/loader.c -o build/loader.o
+	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/mgmt_server.c -o build/mgmt_server.o
+	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/mgmt_client.c -o build/mgmt_client.o
+	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/logger.c -o build/logger.o
+	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/allow_ops.c -o build/allow_ops.o
+	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/always_allow.c -o build/always_allow.o
 	$(CC) $(USR_CFLAGS) -Iinclude -Isrc -c src/hpke_openssl.c -o build/hpke_openssl.o
-	$(CC) $(USR_LDFLAGS) build/loader.o build/hpke_openssl.o -o $(LOADER) $(USR_LDLIBS)
+	$(CC) $(USR_LDFLAGS) build/loader.o build/mgmt_server.o build/mgmt_client.o build/logger.o build/allow_ops.o build/always_allow.o build/hpke_openssl.o -o $(LOADER) $(USR_LDLIBS)
 
 clean:
 	rm -f $(BPFOBJ) $(TCBPFOBJ) $(SKEL) $(VMLINUX) build/*.o $(LOADER)
