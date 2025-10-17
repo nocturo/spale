@@ -20,6 +20,7 @@
 #include <sys/prctl.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <getopt.h>
 #include <sys/un.h>
 #include <dirent.h>
@@ -612,6 +613,8 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         xdp_skel = spa_kern_bpf__open();
         if (!xdp_skel) { LOG_ERROR("Failed to open XDP BPF skeleton"); return 1; }
         if (spa_kern_bpf__load(xdp_skel)) { LOG_ERROR("Failed to load XDP BPF"); return 1; }
+
+        /* cfg.local_mac will be filled after cfg is constructed */
     } else {
         tc_skel = spa_kern_tc_bpf__open();
         if (!tc_skel) { LOG_ERROR("Failed to open TC BPF skeleton"); return 1; }
@@ -664,6 +667,26 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     cfg.spa_rl_rate_per_sec = (unsigned)parse_int_env("SPA_RL_RATE", 3);
     cfg.spa_rl_burst = (unsigned)parse_int_env("SPA_RL_BURST", 3);
     cfg.log_only = log_only ? 1u : 0u;
+    /* Obtain local MAC for host-only gating in XDP */
+    do {
+        struct ifreq ifr; memset(&ifr, 0, sizeof(ifr));
+        (void)snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", iface);
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            if (ioctl(s, SIOCGIFHWADDR, &ifr) == 0) {
+                memcpy(cfg.local_mac, ifr.ifr_hwaddr.sa_data, 6);
+                LOG_INFO("local MAC for %s set to %02x:%02x:%02x:%02x:%02x:%02x",
+                         iface,
+                         cfg.local_mac[0], cfg.local_mac[1], cfg.local_mac[2],
+                         cfg.local_mac[3], cfg.local_mac[4], cfg.local_mac[5]);
+            } else {
+                LOG_WARN("ioctl SIOCGIFHWADDR failed for %s: %s", iface, strerror(errno));
+            }
+            close(s);
+        } else {
+            LOG_WARN("socket() failed obtaining MAC for %s: %s", iface, strerror(errno));
+        }
+    } while (0);
     const char *pp = getenv("PROTECTED_PORTS");
     cfg.num_ports = 0;
     if (pp && *pp) {

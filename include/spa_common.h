@@ -12,6 +12,8 @@ struct spa_config {
 #define PROTECTED_PORTS_MAX 16
     unsigned short protected_ports[PROTECTED_PORTS_MAX]; /* network byte order */
     unsigned int log_only;                       /* when non-zero, never drop traffic; log-only */
+    unsigned char local_mac[6];                  /* ingress interface MAC for host-only gate */
+    unsigned char _padding[2];             /* padding for alignment */
 };
 
 struct allowed_entry {

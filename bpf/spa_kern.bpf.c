@@ -8,6 +8,8 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+/* Use local_mac provided via config_map for XDP host-only gating */
+
 static __always_inline int parse_eth(void *data, void *data_end, __u16 *eth_proto, __u64 *offset)
 {
     struct ethhdr *eth = data;
@@ -22,6 +24,18 @@ int xdp_spa(struct xdp_md *ctx)
 {
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
+    /* Host-only gate on XDP: if dest MAC is not local and not group, pass */
+	struct ethhdr *eth0 = data;
+	if ((void *)(eth0 + 1) > data_end) {
+		return XDP_PASS;
+	}
+    bool is_group = (eth0->h_dest[0] & 1) != 0;
+    __u32 cfg_key_gate = 0;
+    struct spa_config *cfg_gate = bpf_map_lookup_elem(&config_map, &cfg_key_gate);
+    if (!cfg_gate) return XDP_PASS;
+    if (!is_group && __builtin_memcmp(eth0->h_dest, cfg_gate->local_mac, 6) != 0) {
+        return XDP_PASS;
+    }
 	__u16 eth_proto;
 	__u64 nh_off = 0;
 	if (parse_eth(data, data_end, &eth_proto, &nh_off) < 0)

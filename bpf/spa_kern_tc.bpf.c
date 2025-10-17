@@ -18,6 +18,9 @@ static __always_inline int load_bytes(void *dst, void *data, void *data_end, __u
 SEC("classifier")
 int tc_spa(struct __sk_buff *skb)
 {
+	/* Only enforce on host-destined frames. On bridges, skip transit frames. */
+	if (skb->pkt_type != 0 /* PACKET_HOST */)
+		return BPF_OK;
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
 	struct ethhdr eth;
