@@ -18,10 +18,10 @@ jobs:
       matrix:
         distro:
           - { name: alma9,  container: 'almalinux:9' }
-#          - { name: alma10, container: 'almalinux:10' }
-#          - { name: debian12,  container: 'debian:12' }
-#          - { name: debian13,  container: 'debian:13' }
-#          - { name: ubuntu2404, container: 'ubuntu:24.04' }
+          - { name: alma10, container: 'almalinux:10' }
+          - { name: debian12,  container: 'debian:12' }
+          - { name: debian13,  container: 'debian:13' }
+          - { name: ubuntu2404, container: 'ubuntu:24.04' }
 
     container:
       image: ${{ matrix.distro.container }}
