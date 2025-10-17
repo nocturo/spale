@@ -2,7 +2,7 @@ Source: spale
 Section: net
 Priority: optional
 Maintainer: Nemanja Zeljkovic <nocturo@g-mail.com>
-Build-Depends: debhelper-compat (= 13), make, gcc, clang, bpftool, libbpf-dev, libelf-dev, zlib1g-dev, libssl-dev, pkg-config
+Build-Depends: debhelper-compat (= 13), make, gcc, clang-16 | clang (>= 15), bpftool, libbpf-dev, libelf-dev, zlib1g-dev, libssl-dev, pkg-config
 Standards-Version: 4.6.2
 Homepage: https://github.com/nocturo/spale
 Rules-Requires-Root: no

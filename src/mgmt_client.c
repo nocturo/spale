@@ -9,6 +9,7 @@
 #include <sys/un.h>
 #include <sys/time.h>
 #include <time.h>
+#include <stddef.h>
 
 #include "mgmt_client.h"
 #include "paths.h"

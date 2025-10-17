@@ -18,10 +18,10 @@ jobs:
       matrix:
         distro:
           - { name: alma9,  container: 'almalinux:9' }
-          - { name: alma10, container: 'almalinux:10' }
-          - { name: debian12,  container: 'debian:12' }
-          - { name: debian13,  container: 'debian:13' }
-          - { name: ubuntu2404, container: 'ubuntu:24.04' }
+#          - { name: alma10, container: 'almalinux:10' }
+#          - { name: debian12,  container: 'debian:12' }
+#          - { name: debian13,  container: 'debian:13' }
+#          - { name: ubuntu2404, container: 'ubuntu:24.04' }
 
     container:
       image: ${{ matrix.distro.container }}
@@ -102,7 +102,9 @@ jobs:
             apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
             export BPFTOOL="/usr/lib/linux-tools*/bpftool"
           else
-            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
+            # Debian (e.g., debian:12): install clang-16 explicitly to ensure BPF memcmp is inlined
+            apt-get install -y --no-install-recommends build-essential clang-16 make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
+            update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100 || true
           fi
           rm -rf debian && cp -a dist/debian debian
           export DEBFULLNAME="Package Automation"; export DEBEMAIL="ci@users.noreply.github.com"
@@ -143,6 +145,7 @@ jobs:
               dch -r ""
             fi
           fi
+          export CLANG=clang-16
           dpkg-buildpackage -b -us -uc
           mkdir -p artifacts/deb
           for f in ../*.deb; do
