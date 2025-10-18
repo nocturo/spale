@@ -612,13 +612,10 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     if (mode == MODE_XDP) {
         xdp_skel = spa_kern_bpf__open();
         if (!xdp_skel) { LOG_ERROR("Failed to open XDP BPF skeleton"); return 1; }
-        if (spa_kern_bpf__load(xdp_skel)) { LOG_ERROR("Failed to load XDP BPF"); return 1; }
-
         /* cfg.local_mac will be filled after cfg is constructed */
     } else {
         tc_skel = spa_kern_tc_bpf__open();
         if (!tc_skel) { LOG_ERROR("Failed to open TC BPF skeleton"); return 1; }
-        if (spa_kern_tc_bpf__load(tc_skel)) { LOG_ERROR("Failed to load TC BPF"); return 1; }
     }
 
     const char *pin_dir = SPALE_PIN_DIR;
@@ -629,23 +626,71 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     if (pin_maps) {
         (void)mkdir("/sys/fs/bpf", 0755);
         (void)mkdir(pin_dir, 0755);
-        // Clean up any stale pins from previous runs
-        (void)unlink(allowed_path);
-        (void)unlink(allowed6_path);
-        (void)unlink(config_path);
-        if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.allowed_ipv4, allowed_path) : bpf_map__pin(tc_skel->maps.allowed_ipv4, allowed_path)) {
-            LOG_WARN("could not pin allowed_ipv4 map: %s", strerror(errno));
+        int exists = 0;
+        struct stat stb;
+        if (stat(allowed_path, &stb) == 0) exists++;
+        if (stat(allowed6_path, &stb) == 0) exists++;
+        if (stat(config_path, &stb) == 0) exists++;
+        if (stat(ppset_path, &stb) == 0) exists++;
+        if (exists > 0 && exists < 4) {
+            LOG_ERROR("pinned maps partially present in %s (have %d/4): cannot safely reuse", pin_dir, exists);
+            return 1;
         }
-        if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.allowed_ipv6, allowed6_path) : bpf_map__pin(tc_skel->maps.allowed_ipv6, allowed6_path)) {
-            LOG_WARN("could not pin allowed_ipv6 map: %s", strerror(errno));
+        if (exists == 4) {
+            /* Reuse the already pinned maps by attaching their FDs to the
+             * skeleton maps before loading, so the program binds to them.
+             */
+            int fd_allowed4 = bpf_obj_get(allowed_path);
+            int fd_allowed6 = bpf_obj_get(allowed6_path);
+            int fd_cfg      = bpf_obj_get(config_path);
+            int fd_ppset    = bpf_obj_get(ppset_path);
+            if (fd_allowed4 < 0 || fd_allowed6 < 0 || fd_cfg < 0 || fd_ppset < 0) {
+                LOG_ERROR("failed to open pinned map(s) from %s: %s", pin_dir, strerror(errno));
+                if (fd_allowed4 >= 0) close(fd_allowed4);
+                if (fd_allowed6 >= 0) close(fd_allowed6);
+                if (fd_cfg >= 0) close(fd_cfg);
+                if (fd_ppset >= 0) close(fd_ppset);
+                return 1;
+            }
+            if (mode == MODE_XDP) {
+                if (bpf_map__reuse_fd(xdp_skel->maps.allowed_ipv4, fd_allowed4) != 0 ||
+                    bpf_map__reuse_fd(xdp_skel->maps.allowed_ipv6, fd_allowed6) != 0 ||
+                    bpf_map__reuse_fd(xdp_skel->maps.config_map,  fd_cfg)      != 0 ||
+                    bpf_map__reuse_fd(xdp_skel->maps.protected_ports_set, fd_ppset) != 0) {
+                    LOG_ERROR("failed to reuse pinned maps (xdp)");
+                    close(fd_allowed4); close(fd_allowed6); close(fd_cfg); close(fd_ppset);
+                    return 1;
+                }
+            } else {
+                if (bpf_map__reuse_fd(tc_skel->maps.allowed_ipv4, fd_allowed4) != 0 ||
+                    bpf_map__reuse_fd(tc_skel->maps.allowed_ipv6, fd_allowed6) != 0 ||
+                    bpf_map__reuse_fd(tc_skel->maps.config_map,  fd_cfg)      != 0 ||
+                    bpf_map__reuse_fd(tc_skel->maps.protected_ports_set, fd_ppset) != 0) {
+                    LOG_ERROR("failed to reuse pinned maps (tc)");
+                    close(fd_allowed4); close(fd_allowed6); close(fd_cfg); close(fd_ppset);
+                    return 1;
+                }
+            }
+            LOG_INFO("Reusing pinned maps from %s", pin_dir);
+        } else {
+            if (mode == MODE_XDP) {
+                (void)bpf_map__set_pin_path(xdp_skel->maps.allowed_ipv4, allowed_path);
+                (void)bpf_map__set_pin_path(xdp_skel->maps.allowed_ipv6, allowed6_path);
+                (void)bpf_map__set_pin_path(xdp_skel->maps.config_map,  config_path);
+                (void)bpf_map__set_pin_path(xdp_skel->maps.protected_ports_set, ppset_path);
+            } else {
+                (void)bpf_map__set_pin_path(tc_skel->maps.allowed_ipv4, allowed_path);
+                (void)bpf_map__set_pin_path(tc_skel->maps.allowed_ipv6, allowed6_path);
+                (void)bpf_map__set_pin_path(tc_skel->maps.config_map,  config_path);
+                (void)bpf_map__set_pin_path(tc_skel->maps.protected_ports_set, ppset_path);
+            }
         }
-        if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.config_map, config_path) : bpf_map__pin(tc_skel->maps.config_map, config_path)) {
-            LOG_WARN("could not pin config_map: %s", strerror(errno));
-        }
-        (void)unlink(ppset_path);
-        if (mode == MODE_XDP ? bpf_map__pin(xdp_skel->maps.protected_ports_set, ppset_path) : bpf_map__pin(tc_skel->maps.protected_ports_set, ppset_path)) {
-            LOG_WARN("could not pin protected_ports_set: %s", strerror(errno));
-        }
+    }
+
+    if (mode == MODE_XDP) {
+        if (spa_kern_bpf__load(xdp_skel)) { LOG_ERROR("Failed to load XDP BPF"); return 1; }
+    } else {
+        if (spa_kern_tc_bpf__load(tc_skel)) { LOG_ERROR("Failed to load TC BPF"); return 1; }
     }
 
     if (drop_privs_arg) {
@@ -705,15 +750,40 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         cfg.num_ports = count;
     }
 
-	__u32 idx0 = 0;
-    if (bpf_map_update_elem(bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map), &idx0, &cfg, BPF_ANY) != 0) {
-		LOG_ERROR("Failed to set config: %s", strerror(errno));
-		return 1;
-	}
+    __u32 idx0 = 0;
+    {
+        int cfg_fd = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map);
+        struct spa_config oldcfg; memset(&oldcfg, 0, sizeof(oldcfg));
+        bool need_update = true;
+        if (bpf_map_lookup_elem(cfg_fd, &idx0, &oldcfg) == 0) {
+            if (memcmp(&oldcfg, &cfg, sizeof(cfg)) == 0) need_update = false;
+        }
+        if (need_update) {
+            if (bpf_map_update_elem(cfg_fd, &idx0, &cfg, BPF_ANY) != 0) {
+                LOG_ERROR("Failed to set config: %s", strerror(errno));
+                return 1;
+            }
+        }
+    }
 
     {
         int set_fd = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.protected_ports_set : tc_skel->maps.protected_ports_set);
         __u8 one = 1;
+        {
+            __u16 cur_key = 0, next_key = 0;
+            int r = bpf_map_get_next_key(set_fd, NULL, &cur_key);
+            while (r == 0) {
+                bool keep = false;
+                for (unsigned i = 0; i < cfg.num_ports; i++) {
+                    if (cur_key == cfg.protected_ports[i]) { keep = true; break; }
+                }
+                if (!keep) {
+                    (void)bpf_map_delete_elem(set_fd, &cur_key);
+                }
+                next_key = cur_key;
+                r = bpf_map_get_next_key(set_fd, &next_key, &cur_key);
+            }
+        }
         if (cfg.num_ports > 0) {
             for (unsigned i = 0; i < cfg.num_ports; i++) {
                 __u16 key = cfg.protected_ports[i];
@@ -858,20 +928,6 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     } else {
         (void)bpf_tc_detach(&tc_hook, &tc_opts);
         (void)bpf_tc_hook_destroy(&tc_hook);
-    }
-    if (pin_maps) {
-        if (mode == MODE_XDP) {
-            (void)bpf_map__unpin(xdp_skel->maps.allowed_ipv4, allowed_path);
-            (void)bpf_map__unpin(xdp_skel->maps.allowed_ipv6, allowed6_path);
-            (void)bpf_map__unpin(xdp_skel->maps.config_map, config_path);
-            (void)bpf_map__unpin(xdp_skel->maps.protected_ports_set, ppset_path);
-        } else {
-            (void)bpf_map__unpin(tc_skel->maps.allowed_ipv4, allowed_path);
-            (void)bpf_map__unpin(tc_skel->maps.allowed_ipv6, allowed6_path);
-            (void)bpf_map__unpin(tc_skel->maps.config_map, config_path);
-            (void)bpf_map__unpin(tc_skel->maps.protected_ports_set, ppset_path);
-        }
-        (void)rmdir(pin_dir);
     }
     if (mode == MODE_XDP) spa_kern_bpf__destroy(xdp_skel);
     else spa_kern_tc_bpf__destroy(tc_skel);
