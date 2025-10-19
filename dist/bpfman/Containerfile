@@ -1,0 +1,6 @@
+# Copy artifact to new blank image
+FROM scratch
+COPY bpf/external-xdp.o /external-xdp.o
+
+LABEL io.ebpf.maps="{\"allowed_ipv4\": \"lru_hash\", \"allowed_ipv6\": \"lru_hash\", \"config_map\": \"array\", \"spa_rl\": \"lru_hash\", \"spa_rl6\": \"lru_hash\", \"always_allow_v4\": \"lpm_trie\", \"always_allow_v6\": \"lpm_trie\", \"protected_ports_set\": \"hash\"}"
+LABEL io.ebpf.programs="{\"xdp_spa\":\"xdp\"}"
