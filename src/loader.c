@@ -155,7 +155,7 @@ static volatile sig_atomic_t keep_running = 1;
 static void on_sigint(int signo) { (void)signo; keep_running = 0; }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [-c /etc/spale/spale.conf] -i <iface> -S <listen_port> [-t idle_sec] [-g grace_sec] [-m xdp|tc] [-p] [-n] --server-key <path> --clients <path> [--drop-privs user[:group]]\n", prog);
+    fprintf(stderr, "Usage: %s [-c /etc/spale/spale.conf] -i <iface> -S <listen_port> [-t idle_sec] [-g grace_sec] [-m xdp|tc] [-p] [-n] --server-key <path> --clients <path> [--drop-privs user[:group]] [--external-xdp] [--pin-dir <bpffs_dir>]\n", prog);
 }
 static int parse_user_group(const char *arg, uid_t *out_uid, gid_t *out_gid)
 {
@@ -304,7 +304,7 @@ static unsigned load_client_ports_from_env_and_filter(const HpkePayload *pl,
     snprintf(envk, sizeof(envk), "%s_PORTS", cid_upper);
     const char *v = getenv(envk);
     if (!v || !*v) {
-        LOG_WARN("No client ports env for key %s", envk);
+        LOG_DEBUG("No client ports env for key %s", envk);
         return 0;
     }
 
@@ -322,13 +322,17 @@ static unsigned load_client_ports_from_env_and_filter(const HpkePayload *pl,
     return client_n;
 }
 
-static int setup_udp4(uint16_t port, int *out_fd)
+static int setup_udp4(uint16_t port, const char *addr_str, int *out_fd)
 {
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) return -1;
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (addr_str && *addr_str) {
+        if (inet_pton(AF_INET, addr_str, &addr.sin_addr) != 1) { int e = errno; close(s); errno = e ? e : EINVAL; return -1; }
+    } else {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
     addr.sin_port = htons(port);
     if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) { int e = errno; close(s); errno = e; return -1; }
     int flags = fcntl(s, F_GETFL, 0);
@@ -337,7 +341,7 @@ static int setup_udp4(uint16_t port, int *out_fd)
     return 0;
 }
 
-static int setup_udp6(uint16_t port, int *out_fd)
+static int setup_udp6(uint16_t port, const char *addr_str, int *out_fd)
 {
     int s = socket(AF_INET6, SOCK_DGRAM, 0);
     if (s < 0) return -1;
@@ -345,7 +349,11 @@ static int setup_udp6(uint16_t port, int *out_fd)
     (void)setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
     struct sockaddr_in6 addr6; memset(&addr6, 0, sizeof(addr6));
     addr6.sin6_family = AF_INET6;
-    addr6.sin6_addr = in6addr_any;
+    if (addr_str && *addr_str) {
+        if (inet_pton(AF_INET6, addr_str, &addr6.sin6_addr) != 1) { int e = errno; close(s); errno = e ? e : EINVAL; return -1; }
+    } else {
+        addr6.sin6_addr = in6addr_any;
+    }
     addr6.sin6_port = htons(port);
     if (bind(s, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) { int e = errno; close(s); errno = e; return -1; }
     int flags = fcntl(s, F_GETFL, 0);
@@ -495,10 +503,14 @@ int main(int argc, char **argv) {
 	uint32_t grace_sec = 300;
     bool log_only = false;
     bool manage_mode = false;
+    bool external_xdp = false;        /* open pinned maps, do not load/attach XDP */
+    const char *pin_dir_cli = NULL;   /* override for bpffs dir containing pinned maps */
     const char *drop_privs_arg = NULL;
     uid_t drop_uid = (uid_t)-1; gid_t drop_gid = (gid_t)-1;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
+
+    logger_init_from_env();
 
     // Check for manage mode first to avoid parsing manage-specific options
     for (int i = 1; i < argc; i++) {
@@ -515,6 +527,8 @@ static struct option long_opts[] = {
     {"clients", required_argument, 0, 1001},
     {"drop-privs", required_argument, 0, 1002},
     {"manage", no_argument, 0, 1003},
+    {"external-xdp", no_argument, 0, 1004},
+    {"pin-dir", required_argument, 0, 1005},
     {0, 0, 0, 0}
 };
 int opt, longidx = 0;
@@ -536,6 +550,8 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         case 1001: clients_path = optarg; break;
         case 1002: drop_privs_arg = optarg; break;
         case 1003: manage_mode = true; break;
+        case 1004: external_xdp = true; break;
+        case 1005: pin_dir_cli = optarg; break;
 		default: usage(argv[0]); return 1;
 		}
 	}
@@ -609,21 +625,22 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
 
     struct spa_kern_bpf *xdp_skel = NULL;
     struct spa_kern_tc_bpf *tc_skel = NULL;
-    if (mode == MODE_XDP) {
+    if (mode == MODE_XDP && !external_xdp) {
         xdp_skel = spa_kern_bpf__open();
         if (!xdp_skel) { LOG_ERROR("Failed to open XDP BPF skeleton"); return 1; }
         /* cfg.local_mac will be filled after cfg is constructed */
-    } else {
+    } else if (mode == MODE_TC) {
         tc_skel = spa_kern_tc_bpf__open();
         if (!tc_skel) { LOG_ERROR("Failed to open TC BPF skeleton"); return 1; }
     }
 
     const char *pin_dir = SPALE_PIN_DIR;
+    if (pin_dir_cli && *pin_dir_cli) pin_dir = pin_dir_cli;
     const char *allowed_path = SPALE_PIN_ALLOWED_V4;
     const char *allowed6_path = SPALE_PIN_ALLOWED_V6;
     const char *config_path  = SPALE_PIN_CONFIG_MAP;
     const char *ppset_path   = SPALE_PIN_PROTECTED_PORTS;
-    if (pin_maps) {
+    if (pin_maps && !external_xdp) {
         (void)mkdir("/sys/fs/bpf", 0755);
         (void)mkdir(pin_dir, 0755);
         int exists = 0;
@@ -687,9 +704,9 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         }
     }
 
-    if (mode == MODE_XDP) {
+    if (mode == MODE_XDP && !external_xdp) {
         if (spa_kern_bpf__load(xdp_skel)) { LOG_ERROR("Failed to load XDP BPF"); return 1; }
-    } else {
+    } else if (mode == MODE_TC) {
         if (spa_kern_tc_bpf__load(tc_skel)) { LOG_ERROR("Failed to load TC BPF"); return 1; }
     }
 
@@ -706,6 +723,7 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     }
 
     struct spa_config cfg = {0};
+    cfg.version = SPALE_CFG_VERSION;
     cfg.spa_port = htons(spa_port);
     cfg.idle_extend_ns = (uint64_t)idle_sec * 1000000000ull;
     cfg.post_disconnect_grace_ns = (uint64_t)grace_sec * 1000000000ull;
@@ -750,13 +768,67 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         cfg.num_ports = count;
     }
 
+    /* Resolve map FDs for subsequent operations */
+    int fd_allowed4 = -1, fd_allowed6 = -1, fd_cfg = -1, fd_ppset = -1;
+    int fd_always4 = -1, fd_always6 = -1, fd_rl4 = -1, fd_rl6 = -1;
+    if (mode == MODE_XDP && external_xdp) {
+        char p_allowed4[256], p_allowed6[256], p_cfg[256], p_ppset[256], p_always4[256], p_always6[256], p_rl4[256], p_rl6[256];
+        snprintf(p_allowed4, sizeof(p_allowed4), "%s/allowed_ipv4", pin_dir);
+        snprintf(p_allowed6, sizeof(p_allowed6), "%s/allowed_ipv6", pin_dir);
+        snprintf(p_cfg, sizeof(p_cfg), "%s/config_map", pin_dir);
+        snprintf(p_ppset, sizeof(p_ppset), "%s/protected_ports_set", pin_dir);
+        snprintf(p_always4, sizeof(p_always4), "%s/always_allow_v4", pin_dir);
+        snprintf(p_always6, sizeof(p_always6), "%s/always_allow_v6", pin_dir);
+        snprintf(p_rl4, sizeof(p_rl4), "%s/spa_rl", pin_dir);
+        snprintf(p_rl6, sizeof(p_rl6), "%s/spa_rl6", pin_dir);
+        fd_allowed4 = bpf_obj_get(p_allowed4);
+        fd_allowed6 = bpf_obj_get(p_allowed6);
+        fd_cfg      = bpf_obj_get(p_cfg);
+        fd_ppset    = bpf_obj_get(p_ppset);
+        fd_always4  = bpf_obj_get(p_always4);
+        fd_always6  = bpf_obj_get(p_always6);
+        fd_rl4      = bpf_obj_get(p_rl4);
+        fd_rl6      = bpf_obj_get(p_rl6);
+        if (fd_allowed4 < 0 || fd_allowed6 < 0 || fd_cfg < 0 || fd_ppset < 0 || fd_always4 < 0 || fd_always6 < 0 || fd_rl4 < 0 || fd_rl6 < 0) {
+            LOG_ERROR("external-xdp: failed to open pinned map(s) under %s", pin_dir);
+            if (fd_allowed4 >= 0) close(fd_allowed4);
+            if (fd_allowed6 >= 0) close(fd_allowed6);
+            if (fd_cfg >= 0) close(fd_cfg);
+            if (fd_ppset >= 0) close(fd_ppset);
+            if (fd_always4 >= 0) close(fd_always4);
+            if (fd_always6 >= 0) close(fd_always6);
+            if (fd_rl4 >= 0) close(fd_rl4);
+            if (fd_rl6 >= 0) close(fd_rl6);
+            return 1;
+        }
+        LOG_INFO("external-xdp: using pinned maps from %s", pin_dir);
+    } else {
+        fd_allowed4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv4 : tc_skel->maps.allowed_ipv4);
+        fd_allowed6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv6 : tc_skel->maps.allowed_ipv6);
+        fd_cfg      = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map  : tc_skel->maps.config_map);
+        fd_ppset    = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.protected_ports_set : tc_skel->maps.protected_ports_set);
+        fd_always4  = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v4 : tc_skel->maps.always_allow_v4);
+        fd_always6  = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v6 : tc_skel->maps.always_allow_v6);
+        fd_rl4      = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl : tc_skel->maps.spa_rl);
+        fd_rl6      = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl6 : tc_skel->maps.spa_rl6);
+    }
+
     __u32 idx0 = 0;
     {
-        int cfg_fd = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map);
+        int cfg_fd = fd_cfg;
+        /* Validate config_map value size to avoid ABI mismatches in external mode */
+        struct bpf_map_info mi; memset(&mi, 0, sizeof(mi));
+        __u32 mi_len = sizeof(mi);
+        if (bpf_obj_get_info_by_fd(cfg_fd, &mi, &mi_len) == 0) {
+            if (mi.value_size != sizeof(struct spa_config)) {
+                LOG_ERROR("config_map value_size mismatch (map=%u, expected=%zu). Rebuild kernel/userspace or use matching external-xdp.o.", (unsigned)mi.value_size, sizeof(struct spa_config));
+                return 1;
+            }
+        }
         struct spa_config oldcfg; memset(&oldcfg, 0, sizeof(oldcfg));
         bool need_update = true;
         if (bpf_map_lookup_elem(cfg_fd, &idx0, &oldcfg) == 0) {
-            if (memcmp(&oldcfg, &cfg, sizeof(cfg)) == 0) need_update = false;
+            if (oldcfg.version == cfg.version && memcmp(&oldcfg, &cfg, sizeof(cfg)) == 0) need_update = false;
         }
         if (need_update) {
             if (bpf_map_update_elem(cfg_fd, &idx0, &cfg, BPF_ANY) != 0) {
@@ -767,7 +839,7 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
     }
 
     {
-        int set_fd = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.protected_ports_set : tc_skel->maps.protected_ports_set);
+        int set_fd = fd_ppset;
         __u8 one = 1;
         {
             __u16 cur_key = 0, next_key = 0;
@@ -794,16 +866,16 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
 
     always_allow_parse_and_apply(
         getenv("ALWAYS_ALLOW"),
-        bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv4 : tc_skel->maps.allowed_ipv4),
-        bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v4 : tc_skel->maps.always_allow_v4),
-        bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv6 : tc_skel->maps.allowed_ipv6),
-        bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v6 : tc_skel->maps.always_allow_v6),
+        fd_allowed4,
+        fd_always4,
+        fd_allowed6,
+        fd_always6,
         &cfg);
 
     __u32 xdp_flags = 0;
     struct bpf_tc_hook tc_hook = {0};
     struct bpf_tc_opts tc_opts = {0};
-    if (mode == MODE_XDP) {
+    if (mode == MODE_XDP && !external_xdp) {
         xdp_flags = XDP_FLAGS_SKB_MODE;
         if (bpf_xdp_attach(ifindex, bpf_program__fd(xdp_skel->progs.xdp_spa), xdp_flags, NULL) != 0) {
             xdp_flags = XDP_FLAGS_DRV_MODE;
@@ -815,7 +887,7 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         unsigned pro_count = cfg.num_ports;
         LOG_INFO("Attached XDP(%s) to %s, protecting %u port(s), SPA on %u",
                (xdp_flags == XDP_FLAGS_DRV_MODE ? "drv" : "skb"), iface, pro_count, spa_port);
-    } else {
+    } else if (mode == MODE_TC) {
         tc_hook.sz = sizeof(tc_hook);
         tc_hook.ifindex = ifindex;
         tc_hook.attach_point = BPF_TC_INGRESS;
@@ -839,10 +911,36 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         LOG_INFO("Attached TC ingress to %s, protecting %u port(s), SPA on %u", iface, pro_count, spa_port);
     }
 
+    const char *listen_addr4 = getenv("LISTEN_ADDR");
+    const char *listen_addr6 = getenv("LISTEN_ADDR6");
+    if ((!listen_addr6 || !*listen_addr6) && listen_addr4 && *listen_addr4) {
+        struct in6_addr tmp6; memset(&tmp6, 0, sizeof(tmp6));
+        if (strchr(listen_addr4, ':') != NULL || inet_pton(AF_INET6, listen_addr4, &tmp6) == 1) {
+            listen_addr6 = listen_addr4; listen_addr4 = NULL;
+        }
+    }
     int s4 = -1, s6 = -1;
-    if (setup_udp4(spa_port, &s4) != 0) { LOG_ERROR("bind v4 failed on %u", (unsigned)spa_port); return 1; }
-    if (setup_udp6(spa_port, &s6) != 0) { LOG_ERROR("bind v6 failed on %u", (unsigned)spa_port); return 1; }
-    LOG_INFO("Listening for SPA on 0.0.0.0:%u and [::]:%u", (unsigned)spa_port, (unsigned)spa_port);
+    if (setup_udp4(spa_port, listen_addr4, &s4) != 0) {
+        LOG_ERROR("bind v4 failed on %s:%u", listen_addr4 && *listen_addr4 ? listen_addr4 : "0.0.0.0", (unsigned)spa_port);
+        return 1;
+    }
+    if (setup_udp6(spa_port, listen_addr6, &s6) != 0) {
+        int e = errno;
+        if (e == EAFNOSUPPORT || e == EPROTONOSUPPORT) {
+            LOG_WARN("IPv6 not available; continuing without v6");
+            s6 = -1;
+        } else {
+            LOG_ERROR("bind v6 failed on [%s]:%u: %s", listen_addr6 && *listen_addr6 ? listen_addr6 : "::", (unsigned)spa_port, strerror(e));
+            return 1;
+        }
+    }
+    const char *log4 = (listen_addr4 && *listen_addr4) ? listen_addr4 : "0.0.0.0";
+    const char *log6 = (listen_addr6 && *listen_addr6) ? listen_addr6 : "::";
+    if (s6 >= 0) {
+        LOG_INFO("Listening for SPA on %s:%u and [%s]:%u", log4, (unsigned)spa_port, log6, (unsigned)spa_port);
+    } else {
+        LOG_INFO("Listening for SPA on %s:%u (IPv6 disabled)", log4, (unsigned)spa_port);
+    }
     
     // Only create PID file after successful port binding
     pidfile = fopen(pidfile_path, "w");
@@ -890,14 +988,14 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
 	struct loop_ctx lctx;
 	lctx.hpke_ctx = hpke_ctx;
 	lctx.cfg = &cfg;
-	lctx.map_fd_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv4 : tc_skel->maps.allowed_ipv4);
-	lctx.map_fd_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.allowed_ipv6 : tc_skel->maps.allowed_ipv6);
-    lctx.map_always_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v4 : tc_skel->maps.always_allow_v4);
-    lctx.map_always_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.always_allow_v6 : tc_skel->maps.always_allow_v6);
-    lctx.map_ports_set = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.protected_ports_set : tc_skel->maps.protected_ports_set);
-    lctx.map_config = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.config_map : tc_skel->maps.config_map);
-    lctx.map_rl_v4 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl : tc_skel->maps.spa_rl);
-    lctx.map_rl_v6 = bpf_map__fd(mode == MODE_XDP ? xdp_skel->maps.spa_rl6 : tc_skel->maps.spa_rl6);
+    lctx.map_fd_v4 = fd_allowed4;
+    lctx.map_fd_v6 = fd_allowed6;
+    lctx.map_always_v4 = fd_always4;
+    lctx.map_always_v6 = fd_always6;
+    lctx.map_ports_set = fd_ppset;
+    lctx.map_config = fd_cfg;
+    lctx.map_rl_v4 = fd_rl4;
+    lctx.map_rl_v6 = fd_rl6;
 	lctx.s4 = s4;
 	lctx.s6 = s6;
     lctx.mgmt_fd = mgmt_fd;
@@ -920,17 +1018,17 @@ while ((opt = getopt_long(argc, argv, "c:i:S:t:g:pm:n", long_opts, &longidx)) !=
         if (hpke_ctx) hpke_free(hpke_ctx);
         _exit(0);
     }
-    if (mode == MODE_XDP) {
+    if (mode == MODE_XDP && !external_xdp) {
         if (bpf_xdp_detach(ifindex, xdp_flags, NULL) != 0) {
             (void)bpf_xdp_detach(ifindex, XDP_FLAGS_DRV_MODE, NULL);
             (void)bpf_xdp_detach(ifindex, XDP_FLAGS_SKB_MODE, NULL);
         }
-    } else {
+    } else if (mode == MODE_TC) {
         (void)bpf_tc_detach(&tc_hook, &tc_opts);
         (void)bpf_tc_hook_destroy(&tc_hook);
     }
-    if (mode == MODE_XDP) spa_kern_bpf__destroy(xdp_skel);
-    else spa_kern_tc_bpf__destroy(tc_skel);
+    if (mode == MODE_XDP && !external_xdp) spa_kern_bpf__destroy(xdp_skel);
+    else if (mode == MODE_TC) spa_kern_tc_bpf__destroy(tc_skel);
     if (hpke_ctx) hpke_free(hpke_ctx);
 	return 0;
 }

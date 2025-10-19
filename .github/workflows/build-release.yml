@@ -40,7 +40,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: spale-linux-amd64-static
-          path: build/spale
+          path: |
+            build/spale
+            bpf/external-xdp.o
           if-no-files-found: error
 
       - name: Release (on tag)
@@ -49,5 +51,5 @@ jobs:
         with:
           files: |
             build/spale
-
+            bpf/external-xdp.o
 

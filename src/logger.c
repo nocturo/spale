@@ -23,14 +23,14 @@ void logger_close(void) { if (g_use_syslog) closelog(); g_use_syslog = 0; }
 
 void logger_init_from_env(void)
 {
-    const char *lvl = getenv("SPALE_LOG_LEVEL");
+    const char *lvl = getenv("LOG_LEVEL");
     if (lvl && *lvl) {
         if (strcmp(lvl, "debug") == 0) g_level = LOGGER_DEBUG;
         else if (strcmp(lvl, "info") == 0) g_level = LOGGER_INFO;
         else if (strcmp(lvl, "warn") == 0) g_level = LOGGER_WARN;
         else if (strcmp(lvl, "error") == 0) g_level = LOGGER_ERROR;
     }
-    const char *sysl = getenv("SPALE_USE_SYSLOG");
+    const char *sysl = getenv("LOG_USE_SYSLOG");
     if (sysl && (*sysl == '1' || *sysl == 'y' || *sysl == 'Y')) logger_use_syslog(1);
 }
 

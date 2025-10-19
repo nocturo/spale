@@ -2,7 +2,11 @@
 #ifndef SPA_COMMON_H
 #define SPA_COMMON_H
 
+/* Bump when map layouts change in incompatible ways */
+#define SPALE_CFG_VERSION 1u
+
 struct spa_config {
+    unsigned int version;                        /* userspace<->BPF ABI version */
     unsigned short spa_port;                     /* network byte order */
     unsigned long long idle_extend_ns;           /* how long to extend on any packet */
     unsigned long long post_disconnect_grace_ns; /* grace window after FIN/RST */
@@ -13,7 +17,7 @@ struct spa_config {
     unsigned short protected_ports[PROTECTED_PORTS_MAX]; /* network byte order */
     unsigned int log_only;                       /* when non-zero, never drop traffic; log-only */
     unsigned char local_mac[6];                  /* ingress interface MAC for host-only gate */
-    unsigned char _padding[2];             /* padding for alignment */
+    unsigned char _padding[2];                   /* padding for alignment */
 };
 
 struct allowed_entry {

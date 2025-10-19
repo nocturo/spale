@@ -11,6 +11,9 @@ struct {
 	__uint(max_entries, 16384);
 	__type(key, struct allowed_key);
 	__type(value, struct allowed_entry);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } allowed_ipv4 SEC(".maps");
 
 struct {
@@ -18,6 +21,9 @@ struct {
 	__uint(max_entries, 16384);
 	__type(key, struct allowed6_key);
 	__type(value, struct allowed_entry);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } allowed_ipv6 SEC(".maps");
 
 struct {
@@ -25,6 +31,9 @@ struct {
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, struct spa_config);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } config_map SEC(".maps");
 
 struct {
@@ -32,6 +41,9 @@ struct {
 	__uint(max_entries, 65536);
 	__type(key, __u32);
 	__type(value, struct rl_entry);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } spa_rl SEC(".maps");
 
 struct {
@@ -39,6 +51,9 @@ struct {
 	__uint(max_entries, 65536);
 	__type(key, struct rl6_key);
 	__type(value, struct rl_entry);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } spa_rl6 SEC(".maps");
 
 struct {
@@ -47,6 +62,9 @@ struct {
 	__type(key, struct lpm_v4);
 	__type(value, __u8);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } always_allow_v4 SEC(".maps");
 
 struct {
@@ -55,6 +73,9 @@ struct {
 	__type(key, struct lpm_v6);
 	__type(value, __u8);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } always_allow_v6 SEC(".maps");
 
 struct {
@@ -62,6 +83,9 @@ struct {
 	__uint(max_entries, PROTECTED_PORTS_MAX);
 	__type(key, __u16);
 	__type(value, __u8);
+#ifdef SPALE_PIN_BY_NAME
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } protected_ports_set SEC(".maps");
 
 static __always_inline int rl_allow_v4(__u32 src, const struct spa_config *cfg)

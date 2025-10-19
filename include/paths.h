@@ -8,6 +8,10 @@
 #define SPALE_PIN_ALLOWED_V6         SPALE_PIN_DIR "/allowed_ipv6"
 #define SPALE_PIN_CONFIG_MAP         SPALE_PIN_DIR "/config_map"
 #define SPALE_PIN_PROTECTED_PORTS    SPALE_PIN_DIR "/protected_ports_set"
+#define SPALE_PIN_ALWAYS_V4          SPALE_PIN_DIR "/always_allow_v4"
+#define SPALE_PIN_ALWAYS_V6          SPALE_PIN_DIR "/always_allow_v6"
+#define SPALE_PIN_RL_V4              SPALE_PIN_DIR "/spa_rl"
+#define SPALE_PIN_RL_V6              SPALE_PIN_DIR "/spa_rl6"
 
 #define SPALE_MGMT_SOCK              "/run/spale.sock"
 #define SPALE_PID_FILE               "/run/spale.pid"

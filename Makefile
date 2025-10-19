@@ -3,6 +3,7 @@ CLANG ?= clang
 LLC ?= llc
 BPFOBJ = bpf/spa_kern.bpf.o
 TCBPFOBJ = bpf/spa_kern_tc.bpf.o
+BPFOBJ_EXT = bpf/external-xdp.o
 VMLINUX = bpf/vmlinux.h
 SKEL = src/spa_kern.skel.h
 SKEL_TC = src/spa_kern_tc.skel.h
@@ -28,11 +29,14 @@ SYSCONFDIR ?= /etc/spale
 
 .PHONY: all clean
 
-all: $(VMLINUX) $(BPFOBJ) $(TCBPFOBJ) $(SKEL) $(SKEL_TC) $(LOADER)
+all: $(VMLINUX) $(BPFOBJ) $(TCBPFOBJ) $(SKEL) $(SKEL_TC) $(LOADER) $(BPFOBJ_EXT)
 
 $(BPFOBJ): bpf/spa_kern.bpf.c include/spa_common.h $(VMLINUX)
 	@mkdir -p bpf
 	$(CLANG) $(BPF_CFLAGS) -Iinclude -Ibpf -c $< -o $@
+$(BPFOBJ_EXT): bpf/spa_kern.bpf.c include/spa_common.h $(VMLINUX)
+	@mkdir -p bpf
+	$(CLANG) $(BPF_CFLAGS) -DSPALE_PIN_BY_NAME -Iinclude -Ibpf -c $< -o $@
 
 $(TCBPFOBJ): bpf/spa_kern_tc.bpf.c include/spa_common.h $(VMLINUX)
 	@mkdir -p bpf
@@ -63,7 +67,7 @@ $(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c src/mgmt_server.c src/mgmt
 	$(CC) $(USR_LDFLAGS) build/loader.o build/mgmt_server.o build/mgmt_client.o build/logger.o build/allow_ops.o build/always_allow.o build/hpke_openssl.o -o $(LOADER) $(USR_LDLIBS)
 
 clean:
-	rm -f $(BPFOBJ) $(TCBPFOBJ) $(SKEL) $(VMLINUX) build/*.o $(LOADER)
+	rm -f $(BPFOBJ) $(TCBPFOBJ) $(BPFOBJ_EXT) $(SKEL) $(VMLINUX) build/*.o $(LOADER)
 
 install: all
 	install -Dm0755 $(LOADER) $(DESTDIR)$(PREFIX)/sbin/spale
