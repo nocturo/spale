@@ -40,7 +40,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then
             PKG_VERSION="${GITHUB_REF_NAME#v}"; PKG_RELEASE="1"
           else
-            PKG_VERSION="$(date -u +%Y.%m.%d)-g$(echo "${GITHUB_SHA}" | cut -c1-7)"; PKG_RELEASE="${GITHUB_RUN_NUMBER}"
+            PKG_VERSION="$(date -u +%Y.%m.%d)"; PKG_RELEASE="${GITHUB_RUN_NUMBER}.git$(echo "${GITHUB_SHA}" | cut -c1-7)"
           fi
           echo "PKG_VERSION=$PKG_VERSION" >> $GITHUB_ENV
           echo "PKG_RELEASE=$PKG_RELEASE" >> $GITHUB_ENV
@@ -79,7 +79,8 @@ jobs:
           } >> dist/rpm/spale.spec.gen
           dnf -y install 'dnf-command(config-manager)' || true
           dnf -y groupinstall 'Development Tools'
-          dnf -y install make clang gcc bpftool openssl-devel elfutils-libelf-devel zlib-devel systemd-rpm-macros rpm-build git cmake zlib-devel pkgconfig jq
+          dnf -y install epel-release
+          dnf -y install make clang gcc bpftool openssl-devel elfutils-libelf-devel zlib-devel systemd-rpm-macros rpm-build git cmake pkgconfig jq scdoc
           dnf --enablerepo=crb -y install libbpf libbpf-devel
           mkdir -p /root/rpmbuild/{SOURCES,SRPMS,RPMS,BUILD,SPECS}
           rpmbuild -bb dist/rpm/spale.spec.gen --build-in-place --define "_topdir /root/rpmbuild" --define "_sourcedir $(pwd)" --define "_rpmdir $(pwd)/artifacts/rpm" --define "version ${PKG_VERSION}" --define "release ${PKG_RELEASE}"
@@ -98,10 +99,10 @@ jobs:
           apt-get update
           . /etc/os-release
           if [ "$ID" = "ubuntu" ]; then
-            apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
+            apt-get install -y --no-install-recommends build-essential clang make linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq scdoc
             export BPFTOOL="/usr/lib/linux-tools*/bpftool"
           else
-            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq
+            apt-get install -y --no-install-recommends build-essential clang make bpftool libbpf-dev libelf-dev zlib1g-dev libssl-dev pkg-config debhelper devscripts git jq scdoc
           fi
           # Debian 12: install clang-16 explicitly to ensure BPF memcmp is inlined
           if [ "$ID" = "debian" ] && [ "$VERSION_ID" = "12" ]; then

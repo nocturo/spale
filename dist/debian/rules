@@ -7,6 +7,7 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
 override_dh_auto_build:
 	dh_auto_build -- PREFIX=/usr SYSCONFDIR=/etc/spale
+	$(MAKE) man
 
 override_dh_auto_install:
 	dh_auto_install -- DESTDIR=$(CURDIR)/debian/spale PREFIX=/usr SYSCONFDIR=/etc/spale
@@ -15,6 +16,7 @@ override_dh_auto_install:
 	install -Dm0644 doc/spale.conf.example $(CURDIR)/debian/spale/etc/spale/spale.conf.example
 	install -Dm0644 systemd/spale.service $(CURDIR)/debian/spale/lib/systemd/system/spale.service
 	sed -i 's#/usr/local/sbin/spale#/usr/sbin/spale#g' $(CURDIR)/debian/spale/lib/systemd/system/spale.service
+	install -Dm0644 build/spale.8 $(CURDIR)/debian/spale/usr/share/man/man8/spale.8
 
 override_dh_installsystemd:
 	dh_installsystemd --name=spale spale.service

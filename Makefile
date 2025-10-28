@@ -8,6 +8,7 @@ VMLINUX = bpf/vmlinux.h
 SKEL = src/spa_kern.skel.h
 SKEL_TC = src/spa_kern_tc.skel.h
 LOADER = build/spale
+MANPAGE = build/spale.8
 
 BPFTOOL ?= bpftool
 BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_x86
@@ -27,7 +28,7 @@ endif
 PREFIX ?= /usr/local
 SYSCONFDIR ?= /etc/spale
 
-.PHONY: all clean
+.PHONY: all clean man
 
 all: $(VMLINUX) $(BPFOBJ) $(TCBPFOBJ) $(SKEL) $(SKEL_TC) $(LOADER) $(BPFOBJ_EXT)
 
@@ -55,6 +56,12 @@ $(SKEL_TC): $(TCBPFOBJ)
 	$(BPFTOOL) gen skeleton $< > $@
 
 
+man: $(MANPAGE)
+
+$(MANPAGE): doc/spale.8.scd
+	@mkdir -p build
+	scdoc < doc/spale.8.scd > $(MANPAGE)
+
 $(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c src/mgmt_server.c src/mgmt_client.c src/logger.c src/allow_ops.c src/always_allow.c $(SKEL) $(SKEL_TC) include/spa_common.h include/mgmt_server.h include/mgmt_client.h include/logger.h include/allow_ops.h include/always_allow.h
 	@mkdir -p build
 	$(CC) $(USR_CFLAGS) -DDEFAULT_SYSCONFDIR="$(SYSCONFDIR)" -DDEFAULT_CONF_PATH="$(SYSCONFDIR)/spale.conf" -DDEFAULT_SERVER_KEY="$(SYSCONFDIR)/server.key" -DDEFAULT_CLIENTS_DIR="$(SYSCONFDIR)/clients" -Iinclude -Isrc -c src/loader.c -o build/loader.o
@@ -67,10 +74,11 @@ $(LOADER): src/loader.c src/hpke.h src/hpke_openssl.c src/mgmt_server.c src/mgmt
 	$(CC) $(USR_LDFLAGS) build/loader.o build/mgmt_server.o build/mgmt_client.o build/logger.o build/allow_ops.o build/always_allow.o build/hpke_openssl.o -o $(LOADER) $(USR_LDLIBS)
 
 clean:
-	rm -f $(BPFOBJ) $(TCBPFOBJ) $(BPFOBJ_EXT) $(SKEL) $(VMLINUX) build/*.o $(LOADER)
+	rm -f $(BPFOBJ) $(TCBPFOBJ) $(BPFOBJ_EXT) $(SKEL) $(VMLINUX) build/*.o $(LOADER) $(MANPAGE)
 
 install: all
 	install -Dm0755 $(LOADER) $(DESTDIR)$(PREFIX)/sbin/spale
+	@if [ -f $(MANPAGE) ]; then install -Dm0644 $(MANPAGE) $(DESTDIR)$(PREFIX)/share/man/man8/spale.8; fi
 
 
 # Fuzzing targets (requires clang, libFuzzer, ASan/UBSan, and OpenSSL dev)

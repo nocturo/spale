@@ -5,7 +5,7 @@ Summary:        eBPF Single Packet Authentication with HPKE sender-auth
 
 License:        MIT AND GPL-2.0-only
 URL:            https://github.com/nocturo/spale
-BuildRequires:  make, gcc, clang, bpftool, libbpf-devel, openssl-devel, elfutils-libelf-devel, zlib-devel, systemd-rpm-macros
+BuildRequires:  make, gcc, clang, bpftool, libbpf-devel, openssl-devel, elfutils-libelf-devel, zlib-devel, systemd-rpm-macros, scdoc
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
@@ -19,7 +19,7 @@ the source address is allowlisted per protected destination port.
 # Using in-repo sources; no unpack step required
 
 %build
-make -C %{_sourcedir} PREFIX=%{_prefix} SYSCONFDIR=/etc/spale
+make -C %{_sourcedir} PREFIX=%{_prefix} SYSCONFDIR=/etc/spale all man
 
 %install
 rm -rf %{buildroot}
@@ -28,6 +28,7 @@ install -d -m0750 %{buildroot}/etc/spale
 install -d -m0750 %{buildroot}/etc/spale/clients
 
 make -C %{_sourcedir} install DESTDIR=%{buildroot} PREFIX=%{_prefix} SYSCONFDIR=/etc/spale
+install -Dm0644 %{_sourcedir}/build/spale.8 %{buildroot}%{_mandir}/man8/spale.8
 install -Dm0644 %{_sourcedir}/doc/spale.conf.example %{buildroot}/etc/spale/spale.conf.example
 install -Dm0644 %{_sourcedir}/systemd/spale.service %{buildroot}%{_unitdir}/spale.service
 sed -i 's#/usr/local/sbin/spale#/usr/sbin/spale#g' %{buildroot}%{_unitdir}/spale.service
@@ -45,6 +46,7 @@ sed -i 's#/usr/local/sbin/spale#/usr/sbin/spale#g' %{buildroot}%{_unitdir}/spale
 %license LICENSE LICENSE.BPF
 %doc README.md
 %{_sbindir}/spale
+%{_mandir}/man8/spale.8*
 %dir /etc/spale
 %dir /etc/spale/clients
 /etc/spale/spale.conf.example
