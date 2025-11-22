@@ -4,7 +4,9 @@
 #IFACE=eth0
 #MODE=tc                 # tc|xdp
 
-# SPA UDP listen port (where you send your SPA)
+# SPA UDP listen address and port (where you send your SPA)
+#LISTEN_ADDR=0.0.0.0     # IPv4 address to bind (default: 0.0.0.0)
+#LISTEN_ADDR6=::         # IPv6 address to bind (default: ::)
 #LISTEN_PORT=55555
 
 # Ports to protect (max 16)

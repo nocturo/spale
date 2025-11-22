@@ -12,7 +12,7 @@ Architecture: linux-any
 Depends: ${misc:Depends}, ${shlibs:Depends}, systemd
 Recommends: bpftool
 Description: eBPF Single Packet Authentication with HPKE sender-auth
- High-performance SPA (port knocking) implementedd in eBPF (TC or XDP) with an HPKE
+ High-performance SPA (port knocking) implemented in eBPF (TC or XDP) with an HPKE
  sender-authenticated UDP control channel.
 
 Package: spale-tools

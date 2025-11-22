@@ -14,7 +14,7 @@ High-performance SPA (port knocking) implemented in eBPF (using TC or XDP for he
 - Global SPA UDP rate limiting (per source)
 - Always-allow lists via IPv4/IPv6 exact IPs or CIDR
 - Self contained statically compiled binary
-- Can run without root by dropping privileges after inital startup
+- Can run without root by dropping privileges after initial startup
 - Optional map pinning under bpffs during runtime
 
 ### Requirements
@@ -60,6 +60,21 @@ openssl pkey -in /etc/spale/clients/admin.key -pubout -out admin.pem
 
 Now copy over the client's public key to the server and place it in /etc/spale/clients/admin.pem
 
+Alternatively, use the provided key generation tool. When installed via packages, use `spale-keygen`; otherwise use `python3 tools/spa_keygen.py` from the source tree:
+
+```bash
+# Generate server keys (on server)
+spale-keygen server --install
+
+# Generate client keys (on client device)
+spale-keygen client --name admin --bundle --server-pub /path/to/server.key.pub
+
+# Or install client public key directly on server
+spale-keygen client --name admin --install --bundle
+```
+
+Note: If using from source tree, replace `spale-keygen` with `python3 tools/spa_keygen.py`.
+
 ### Configuration file: `/etc/spale/spale.conf`
 Simple `KEY=VALUE` file. On start, the loader reads this file and exports entries to the environment (CLI flags override env). 
 Example config can be found [here](doc/spale.conf.example).
@@ -82,48 +97,50 @@ sudo /usr/local/sbin/spale -m xdp -i eth0 -S 55555 \
 ```
 
 ### Sending SPA (client)
-Use the provided sender script at [tools/spa_send.py](tools/spa_send.py)
+Use the provided sender script. When installed via packages, use `spale-send`; otherwise use `tools/spa_send.py` from the source tree.
 
 Basic usage with a single key file (server public + client private in one PEM):
 ```bash
 # Create a key file containing both PEM blocks (order doesn't matter)
 cat server.pem admin.key > admin.key
 
-python3 tools/spa_send.py --host 203.0.113.10 --port 55555 \
+spale-send --host 203.0.113.10 --port 55555 \
   --key admin.key
 ```
 
 Profile-based usage:
 ```bash
 # Create profile in user's config dir
-python3 tools/spa_send.py profile create myserver \
+spale-send profile create myserver \
   --host 203.0.113.10 --port 55555 \
   --key admin.key
 
 # Send using the profile
-python3 tools/spa_send.py --profile myserver
+spale-send --profile myserver
 
 # Or use short flag
-python3 tools/spa_send.py -p myserver
+spale-send -p myserver
 ```
 
 Profile management:
 ```bash
 # List profiles
-python3 tools/spa_send.py profile list
+spale-send profile list
 
 # Show profile
-python3 tools/spa_send.py profile show myserver
+spale-send profile show myserver
 
 # Update profile values
-python3 tools/spa_send.py profile set myserver --host 203.0.113.11 --port 55556
+spale-send profile set myserver --host 203.0.113.11 --port 55556
 
 # Replace key for a profile
-python3 tools/spa_send.py profile set myserver --key /path/to/new.key
+spale-send profile set myserver --key /path/to/new.key
 
 # Delete profile
-python3 tools/spa_send.py profile delete -y myserver
+spale-send profile delete -y myserver
 ```
+
+Note: If using from source tree, replace `spale-send` with `python3 tools/spa_send.py`.
 
 Each profile lives in `<config_root>/<name>/` and contains:
 - `config` file with simple `KEY=VALUE` pairs (`HOST`, `PORT`, optional `STEP`, `SOURCE`, `COUNT`)
@@ -145,5 +162,3 @@ Configure via `/etc/spale/spale.conf` (the unit reads it via `EnvironmentFile`).
 - Userspace (`src/`, `tools/`, `include/`): MIT
 - eBPF programs (`bpf/*.bpf.c`): GPL-2.0-only
 - Third-party: OpenSSL (Apache-2.0), libbpf (BSD-2-Clause)
-
-
