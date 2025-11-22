@@ -43,7 +43,7 @@ jobs:
         run: |
           REPO_SLUG="${{ github.repository }}"
           REPO_SLUG_LC="${REPO_SLUG,,}"
-          IMAGE_ID="ghcr.io/${REPO_SLUG_LC}-bpfman"
+          IMAGE_ID="ghcr.io/${REPO_SLUG_LC}-oci"
           echo "image_id=${IMAGE_ID}" >> $GITHUB_OUTPUT
           TAGS="${IMAGE_ID}:sha-${GITHUB_SHA}"
           if [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
@@ -54,11 +54,11 @@ jobs:
           echo "$TAGS" >> $GITHUB_OUTPUT
           echo "TAGS" >> $GITHUB_OUTPUT
 
-      - name: Build and push bpfman image
+      - name: Build and push OCI image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: dist/bpfman/Containerfile
+          file: dist/oci/Containerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
