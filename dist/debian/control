@@ -15,5 +15,10 @@ Description: eBPF Single Packet Authentication with HPKE sender-auth
  High-performance SPA (port knocking) implementedd in eBPF (TC or XDP) with an HPKE
  sender-authenticated UDP control channel.
 
-
+Package: spale-tools
+Architecture: all
+Depends: ${misc:Depends}, python3, python3-cryptography
+Description: client tools for spale SPA
+ Python-based client utilities for spale, including key generation and SPA
+ sender tools, plus profile management for client configurations.
 

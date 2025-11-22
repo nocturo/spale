@@ -17,9 +17,12 @@ override_dh_auto_install:
 	install -Dm0644 systemd/spale.service $(CURDIR)/debian/spale/lib/systemd/system/spale.service
 	sed -i 's#/usr/local/sbin/spale#/usr/sbin/spale#g' $(CURDIR)/debian/spale/lib/systemd/system/spale.service
 	install -Dm0644 build/spale.8 $(CURDIR)/debian/spale/usr/share/man/man8/spale.8
+	# Python client tools in separate spale-tools package
+	install -Dm0755 tools/spa_keygen.py $(CURDIR)/debian/spale-tools/usr/bin/spale-keygen
+	install -Dm0755 tools/spa_send.py $(CURDIR)/debian/spale-tools/usr/bin/spale-send
 
 override_dh_installsystemd:
-	dh_installsystemd --name=spale spale.service
+	dh_installsystemd -p spale --name=spale spale.service
 
 override_dh_auto_test:
 	# no tests
