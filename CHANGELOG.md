@@ -1,8 +1,11 @@
-## [0.3.0] UNRELEASED
+## [0.3.0] 2025-11-22
 ### Added
 - Add support for sideloading XDP program by another loader. Now you can use `spale` alongside other XDP programs
 - Add support for specifying listening address for ipv4 and ipv6. Defaults to `0.0.0.0` and `[::]`
-- Add OCI bytecode image
+- Add external XDP OCI bytecode image
+- Add `spa_keygen.py` tool for easily generating certificates
+- More documentation (man page)
+- Add separate `spale-tools` packages
 
 ### Changed
 - Pin maps are now used for persisting state across runs instead of being teardown. These are required if you are using maps from an external loader
